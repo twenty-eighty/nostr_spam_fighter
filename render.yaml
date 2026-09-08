@@ -5,6 +5,7 @@
 
 databases:
   - name: nostr-spam-fighter-db
+    region: frankfurt
     plan: basic-1gb
     postgresMajorVersion: "16"
     ipAllowList: []
@@ -13,6 +14,7 @@ services:
   - type: web
     name: nostr-spam-fighter
     runtime: docker
+    region: frankfurt
     plan: starter
     healthCheckPath: /health
     maxShutdownDelaySeconds: 120
@@ -24,7 +26,7 @@ services:
       - key: ECTO_SSL
         value: "true"
       - key: ECTO_IPV6
-        value: "true"
+        value: "false"
       - key: POOL_SIZE
         value: "5"
       - key: DATABASE_URL
