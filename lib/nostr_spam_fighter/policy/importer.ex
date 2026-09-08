@@ -9,7 +9,7 @@ defmodule NostrSpamFighter.Policy.Importer do
   alias NostrSpamFighter.Policy.{Blocklist, BlocklistEntry, BlocklistVersion, Cache, Normalizer}
 
   @max_bytes 70_000_000
-  @max_entries 3_000_000
+  @max_entries 5_000_000
   @insert_chunk 2_000
   @max_decrease_ratio 0.5
 
@@ -24,49 +24,48 @@ defmodule NostrSpamFighter.Policy.Importer do
   def parse_entries(format, body, opts \\ []) when is_binary(body) do
     on_progress = Keyword.get(opts, :on_progress)
     limit = max_entries() + 1
-    lines = split_lines(body)
-    total = length(lines)
+    total_bytes = max(byte_size(body), 1)
     started_ms = System.monotonic_time(:millisecond)
     Process.put(:blocklist_import_progress_at, 0)
+    seen = :ets.new(:nsf_import_parse_seen, [:set, :private])
 
-    {entries, _seen, idx} =
-      Enum.reduce_while(lines, {[], MapSet.new(), 0}, fn line, {acc, seen, idx} ->
-        idx = idx + 1
-        report_import_progress(on_progress, "parsing", idx, total, started_ms)
+    try do
+      {entries, lines_seen, _exceeded?} =
+        reduce_lines(body, {[], 0, false}, fn line, {acc, idx, exceeded?} ->
+          idx = idx + 1
+          report_import_progress(on_progress, "parsing", idx, nil, started_ms, total_bytes, idx)
 
-        cond do
-          comment_or_blank?(line) ->
-            {:cont, {acc, seen, idx}}
+          cond do
+            exceeded? or comment_or_blank?(line) ->
+              {acc, idx, exceeded?}
 
-          true ->
-            case safe_parse_line(format, line) do
-              nil ->
-                {:cont, {acc, seen, idx}}
+            true ->
+              case safe_parse_line(format, line) do
+                nil ->
+                  {acc, idx, exceeded?}
 
-              entry ->
-                key = {entry.rule_type, entry.normalized_value}
+                entry ->
+                  key = {entry.rule_type, entry.normalized_value}
 
-                if MapSet.member?(seen, key) do
-                  {:cont, {acc, seen, idx}}
-                else
-                  seen = MapSet.put(seen, key)
-                  acc = [entry | acc]
-
-                  if MapSet.size(seen) >= limit do
-                    {:halt, {acc, seen, idx}}
+                  if :ets.insert_new(seen, {key}) do
+                    acc = [entry | acc]
+                    exceeded? = :ets.info(seen, :size) >= limit
+                    {acc, idx, exceeded?}
                   else
-                    {:cont, {acc, seen, idx}}
+                    {acc, idx, exceeded?}
                   end
-                end
-            end
-        end
-      end)
+              end
+          end
+        end)
 
-    if total > 0 do
-      emit_import_progress(on_progress, "parsing", idx, total)
+      if lines_seen > 0 do
+        emit_import_progress(on_progress, "parsing", lines_seen, lines_seen)
+      end
+
+      Enum.reverse(entries)
+    after
+      :ets.delete(seen)
     end
-
-    Enum.reverse(entries)
   end
 
   defp activate_from_body(blocklist, body, meta) do
@@ -75,92 +74,199 @@ defmodule NostrSpamFighter.Policy.Importer do
         fail_version(blocklist, too_large_reason(byte_size(body)))
 
       true ->
-        entries = parse_entries(blocklist.format, body, on_progress: meta[:on_progress])
-
-        cond do
-          length(entries) > max_entries() ->
-            fail_version(blocklist, "too many entries")
-
-          suspicious_decrease?(blocklist, length(entries)) ->
-            fail_version(blocklist, "suspicious entry count decrease")
-
-          entries == [] ->
-            fail_version(blocklist, "no valid entries")
-
-          true ->
-            store_and_activate(blocklist, entries, meta, body)
-        end
+        store_and_activate(blocklist, body, meta)
     end
   end
 
-  defp store_and_activate(blocklist, entries, meta, body) do
+  defp store_and_activate(blocklist, body, meta) do
     checksum = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
     now = DateTime.utc_now() |> DateTime.truncate(:second)
+    seen = :ets.new(:nsf_import_seen, [:set, :private])
 
-    Repo.transaction(
-      fn ->
-        {:ok, version} =
-          %BlocklistVersion{}
-          |> BlocklistVersion.changeset(%{
-            blocklist_id: blocklist.id,
-            status: "validated",
-            checksum: checksum,
-            entry_count: length(entries),
-            fetched_at: now,
-            validated_at: now
-          })
-          |> Repo.insert()
+    try do
+      Repo.transaction(
+        fn ->
+          {:ok, version} =
+            %BlocklistVersion{}
+            |> BlocklistVersion.changeset(%{
+              blocklist_id: blocklist.id,
+              status: "validated",
+              checksum: checksum,
+              entry_count: 0,
+              fetched_at: now,
+              validated_at: now
+            })
+            |> Repo.insert()
 
-        entry_rows =
-          Enum.map(entries, fn entry ->
-            %{
-              id: Ecto.UUID.generate(),
-              blocklist_version_id: version.id,
-              rule_type: entry.rule_type,
-              normalized_value: entry.normalized_value,
-              inserted_at: now,
-              updated_at: now
-            }
-          end)
+          case stream_insert_entries(
+                 blocklist.format,
+                 body,
+                 version.id,
+                 now,
+                 seen,
+                 meta[:on_progress]
+               ) do
+            {:error, :too_many_entries} ->
+              Repo.rollback(:too_many_entries)
 
-        insert_entries(entry_rows, meta[:on_progress])
+            {:ok, 0} ->
+              Repo.rollback(:no_valid_entries)
 
-        {:ok, version} =
-          version
-          |> BlocklistVersion.changeset(%{status: "active", activated_at: now})
-          |> Repo.update()
+            {:ok, count} ->
+              if suspicious_decrease?(blocklist, count) do
+                Repo.rollback(:suspicious_decrease)
+              else
+                {:ok, version} =
+                  version
+                  |> BlocklistVersion.changeset(%{
+                    status: "active",
+                    activated_at: now,
+                    entry_count: count
+                  })
+                  |> Repo.update()
 
-        deactivate_previous(blocklist, version.id)
+                deactivate_previous(blocklist, version.id)
 
-        {:ok, _blocklist} =
-          blocklist
-          |> Blocklist.changeset(%{
-            active_version_id: version.id,
-            last_success_at: now,
-            last_attempt_at: now,
-            next_refresh_at: DateTime.add(now, blocklist.refresh_interval_s, :second),
-            etag: meta[:etag],
-            last_modified: meta[:last_modified],
-            last_error: nil,
-            refresh_status: "ok"
-          })
-          |> Repo.update()
+                {:ok, _blocklist} =
+                  blocklist
+                  |> Blocklist.changeset(%{
+                    active_version_id: version.id,
+                    last_success_at: now,
+                    last_attempt_at: now,
+                    next_refresh_at: DateTime.add(now, blocklist.refresh_interval_s, :second),
+                    etag: meta[:etag],
+                    last_modified: meta[:last_modified],
+                    last_error: nil,
+                    refresh_status: "ok"
+                  })
+                  |> Repo.update()
 
-        version
-      end,
-      timeout: :infinity
-    )
-    |> case do
-      {:ok, version} ->
-        Cache.rebuild()
-        {:ok, version}
+                version
+              end
+          end
+        end,
+        timeout: :infinity
+      )
+      |> case do
+        {:ok, version} ->
+          Cache.rebuild()
+          {:ok, version}
 
-      {:error, reason} ->
-        fail_version(blocklist, format_store_error(reason))
+        {:error, :too_many_entries} ->
+          fail_version(blocklist, "too many entries")
+
+        {:error, :no_valid_entries} ->
+          fail_version(blocklist, "no valid entries")
+
+        {:error, :suspicious_decrease} ->
+          fail_version(blocklist, "suspicious entry count decrease")
+
+        {:error, reason} ->
+          fail_version(blocklist, format_store_error(reason))
+      end
+    rescue
+      exception ->
+        fail_version(blocklist, Exception.message(exception))
+    after
+      :ets.delete(seen)
     end
-  rescue
-    exception ->
-      fail_version(blocklist, Exception.message(exception))
+  end
+
+  defp stream_insert_entries(format, body, version_id, now, seen, on_progress) do
+    total_bytes = max(byte_size(body), 1)
+    started_ms = System.monotonic_time(:millisecond)
+    Process.put(:blocklist_import_progress_at, 0)
+    limit = max_entries()
+
+    {status, count, chunk, lines_seen} =
+      reduce_lines(body, {:ok, 0, [], 0}, fn line, {status, count, chunk, lines_seen} ->
+        lines_seen = lines_seen + 1
+
+        case status do
+          :ok ->
+            report_import_progress(
+              on_progress,
+              "parsing",
+              lines_seen,
+              nil,
+              started_ms,
+              total_bytes,
+              lines_seen
+            )
+
+            cond do
+              comment_or_blank?(line) ->
+                {:ok, count, chunk, lines_seen}
+
+              true ->
+                case safe_parse_line(format, line) do
+                  nil ->
+                    {:ok, count, chunk, lines_seen}
+
+                  entry ->
+                    key = {entry.rule_type, entry.normalized_value}
+
+                    if :ets.insert_new(seen, {key}) do
+                      if count + 1 > limit do
+                        {:error, count, chunk, lines_seen}
+                      else
+                        row = entry_row(entry, version_id, now)
+                        chunk = [row | chunk]
+                        count = count + 1
+
+                        if length(chunk) >= @insert_chunk do
+                          flush_chunk(Enum.reverse(chunk), on_progress, count, count, started_ms)
+                          {:ok, count, [], lines_seen}
+                        else
+                          {:ok, count, chunk, lines_seen}
+                        end
+                      end
+                    else
+                      {:ok, count, chunk, lines_seen}
+                    end
+                end
+            end
+
+          :error ->
+            {:error, count, chunk, lines_seen}
+        end
+      end)
+
+    case status do
+      :error ->
+        {:error, :too_many_entries}
+
+      :ok ->
+        if chunk != [] do
+          flush_chunk(Enum.reverse(chunk), on_progress, count, count, started_ms)
+        end
+
+        if lines_seen > 0 do
+          emit_import_progress(on_progress, "parsing", lines_seen, lines_seen)
+        end
+
+        if count > 0 do
+          emit_import_progress(on_progress, "saving", count, count)
+        end
+
+        {:ok, count}
+    end
+  end
+
+  defp entry_row(entry, version_id, now) do
+    %{
+      id: Ecto.UUID.generate(),
+      blocklist_version_id: version_id,
+      rule_type: entry.rule_type,
+      normalized_value: entry.normalized_value,
+      inserted_at: now,
+      updated_at: now
+    }
+  end
+
+  defp flush_chunk(rows, on_progress, done, total, started_ms) do
+    Repo.insert_all(BlocklistEntry, rows)
+    report_import_progress(on_progress, "saving", done, total, started_ms, total, done)
   end
 
   def record_failure(%Blocklist{} = blocklist, error) when is_binary(error) do
@@ -212,45 +318,53 @@ defmodule NostrSpamFighter.Policy.Importer do
     Application.get_env(:nostr_spam_fighter, :blocklist_max_entries, @max_entries)
   end
 
-  defp insert_entries(rows, on_progress) do
-    total = length(rows)
-    started_ms = System.monotonic_time(:millisecond)
-    Process.put(:blocklist_import_progress_at, 0)
+  defp reduce_lines(body, acc, fun) when is_binary(body) do
+    do_reduce_lines(body, acc, fun)
+  end
 
-    rows
-    |> Enum.chunk_every(@insert_chunk)
-    |> Enum.reduce(0, fn chunk, done ->
-      Repo.insert_all(BlocklistEntry, chunk)
-      done = done + length(chunk)
-      report_import_progress(on_progress, "saving", done, total, started_ms)
-      done
-    end)
+  defp do_reduce_lines(<<>>, acc, _fun), do: acc
 
-    if total > 0 do
-      emit_import_progress(on_progress, "saving", total, total)
+  defp do_reduce_lines(body, acc, fun) do
+    case :binary.split(body, "\n") do
+      [line] ->
+        fun.(trim_cr(line), acc)
+
+      [line, rest] ->
+        do_reduce_lines(rest, fun.(trim_cr(line), acc), fun)
     end
   end
 
-  defp report_import_progress(nil, _stage, _done, _total, _started_ms), do: :ok
+  defp trim_cr(line), do: String.trim_trailing(line, "\r")
 
-  defp report_import_progress(on_progress, stage, done, total, _started_ms) do
+  defp report_import_progress(nil, _stage, _done, _total, _started_ms, _scale, _pos), do: :ok
+
+  defp report_import_progress(on_progress, stage, done, total, _started_ms, scale, pos) do
     now = System.monotonic_time(:millisecond)
     last = Process.get(:blocklist_import_progress_at, 0)
 
     if last == 0 or now - last >= 250 do
-      emit_import_progress(on_progress, stage, done, total, now)
+      percent =
+        cond do
+          is_integer(total) and total > 0 -> min(100.0, done / total * 100)
+          is_integer(scale) and scale > 0 -> min(100.0, pos / scale * 100)
+          true -> nil
+        end
+
+      Process.put(:blocklist_import_progress_at, now)
+
+      on_progress.(%{
+        phase: "import",
+        stage: stage,
+        done: done,
+        total: total || scale,
+        percent: percent
+      })
     end
   end
 
   defp emit_import_progress(nil, _stage, _done, _total), do: :ok
 
   defp emit_import_progress(on_progress, stage, done, total) do
-    emit_import_progress(on_progress, stage, done, total, System.monotonic_time(:millisecond))
-  end
-
-  defp emit_import_progress(on_progress, stage, done, total, now) do
-    Process.put(:blocklist_import_progress_at, now)
-
     on_progress.(%{
       phase: "import",
       stage: stage,
@@ -262,13 +376,6 @@ defmodule NostrSpamFighter.Policy.Importer do
 
   defp import_percent(_done, total) when not is_integer(total) or total <= 0, do: nil
   defp import_percent(done, total), do: min(100.0, done / total * 100)
-
-  defp split_lines(body) do
-    for line <- :binary.split(body, "\n", [:global, :trim_all]),
-        String.valid?(line) do
-      String.trim_trailing(line, "\r")
-    end
-  end
 
   defp format_store_error(%{message: message}) when is_binary(message), do: message
   defp format_store_error(reason) when is_binary(reason), do: reason

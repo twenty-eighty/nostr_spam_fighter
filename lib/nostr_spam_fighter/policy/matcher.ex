@@ -8,31 +8,34 @@ defmodule NostrSpamFighter.Policy.Matcher do
 
   @spec match_target(String.t() | nil, String.t() | nil) :: [map()]
   def match_target(url, hostname) do
-    rules = Cache.rules()
     host = hostname || (url && Normalizer.hostname_from_url(url))
     normalized_url = url && elem_ok(Normalizer.normalize_url(url))
 
-    Enum.flat_map(rules, fn rule ->
-      if matches_rule?(rule, normalized_url, host), do: [rule], else: []
-    end)
+    match_host_rules(host) ++
+      match_domain_rules(host) ++
+      Cache.match_url_prefixes(normalized_url)
   end
 
-  defp matches_rule?(%{rule_type: "host", normalized_value: value}, _url, host)
-       when is_binary(host) do
-    host == value
+  defp match_host_rules(host) when is_binary(host), do: Cache.lookup("host", host)
+  defp match_host_rules(_), do: []
+
+  defp match_domain_rules(host) when is_binary(host) do
+    host
+    |> domain_candidates()
+    |> Enum.flat_map(&Cache.lookup("domain", &1))
   end
 
-  defp matches_rule?(%{rule_type: "domain", normalized_value: value}, _url, host)
-       when is_binary(host) do
-    domain_match?(host, value)
-  end
+  defp match_domain_rules(_), do: []
 
-  defp matches_rule?(%{rule_type: "url_prefix", normalized_value: value}, url, _host)
-       when is_binary(url) do
-    String.starts_with?(url, value)
-  end
+  # For host "ads.evil.com" => ["ads.evil.com", "evil.com", "com"]
+  # Exact and parent labels cover domain rules without scanning all entries.
+  defp domain_candidates(host) do
+    labels = String.split(host, ".")
 
-  defp matches_rule?(_, _, _), do: false
+    for i <- 0..(length(labels) - 1) do
+      labels |> Enum.drop(i) |> Enum.join(".")
+    end
+  end
 
   @doc """
   A domain rule matches the exact domain or a proper subdomain, never a substring host.
