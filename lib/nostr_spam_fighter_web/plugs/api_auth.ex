@@ -4,6 +4,9 @@ defmodule NostrSpamFighterWeb.Plugs.ApiAuth do
   alias NostrSpamFighter.Accounts
   alias NostrSpamFighter.Accounts.RateLimiter
 
+  # Mix is not available in releases; bake env at compile time.
+  @env Mix.env()
+
   def init(opts), do: opts
 
   def call(conn, opts) do
@@ -13,7 +16,7 @@ defmodule NostrSpamFighterWeb.Plugs.ApiAuth do
          {:ok, key} <- Accounts.verify_api_key(token),
          true <- Accounts.has_scope?(key, scope) || {:error, :forbidden},
          :ok <- RateLimiter.check(key.id, batch_cost(conn)) do
-      if Mix.env() != :test do
+      if @env != :test do
         Task.start(fn -> Accounts.touch_api_key(key, ip(conn)) end)
       end
 
