@@ -1,0 +1,1 @@
+NostrSpamFighter.Policy.ensure_default_categories()

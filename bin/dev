@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Start Nostr Spam Fighter locally for testing. Postgres must already be running.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+export MIX_ENV="${MIX_ENV:-dev}"
+export PORT="${PORT:-4000}"
+export POSTGRES_PORT="${POSTGRES_PORT:-5433}"
+
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
+# Re-apply defaults after .env in case it omitted them.
+export MIX_ENV="${MIX_ENV:-dev}"
+export PORT="${PORT:-4000}"
+export POSTGRES_PORT="${POSTGRES_PORT:-5433}"
+
+if ! command -v mix >/dev/null 2>&1; then
+  echo "mix is not on PATH. Install Elixir/OTP from .tool-versions (asdf/mise)." >&2
+  exit 1
+fi
+
+if [[ ! -d deps ]] || [[ ! -d _build ]]; then
+  echo "==> First-time mix setup"
+  mix setup
+else
+  echo "==> Fetching deps and migrating"
+  mix deps.get
+  mix ecto.create --quiet
+  mix ecto.migrate
+  mix run -e "NostrSpamFighter.Policy.ensure_default_categories()"
+fi
+
+if [[ -n "${INITIAL_ADMIN_PUBKEY:-}" ]]; then
+  echo "==> Bootstrapping admin"
+  mix nsf.bootstrap_admin
+else
+  echo "==> Skipping admin bootstrap (set INITIAL_ADMIN_PUBKEY in .env)"
+fi
+
+echo "==> Starting Phoenix at http://127.0.0.1:${PORT}"
+echo "    Login: http://127.0.0.1:${PORT}/login"
+echo "    Relays: http://127.0.0.1:${PORT}/relays"
+exec mix phx.server

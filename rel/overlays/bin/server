@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+cd -P -- "$(dirname -- "$0")"
+./nostr_spam_fighter eval "NostrSpamFighter.Release.migrate()"
+./nostr_spam_fighter eval "NostrSpamFighter.Release.bootstrap_admin()"
+PHX_SERVER=true exec ./nostr_spam_fighter start

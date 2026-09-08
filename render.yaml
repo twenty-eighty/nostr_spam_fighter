@@ -1,0 +1,44 @@
+# Render Blueprint — https://dashboard.render.com/select-repo?type=blueprint
+#
+# On first apply, Render prompts for INITIAL_ADMIN_PUBKEY and MODERATION_NSEC.
+# INITIAL_ADMIN_PUBKEY must be a 64-character hex Nostr pubkey.
+
+databases:
+  - name: nostr-spam-fighter-db
+    plan: basic-1gb
+    postgresMajorVersion: "16"
+    ipAllowList: []
+
+services:
+  - type: web
+    name: nostr-spam-fighter
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: MIX_ENV
+        value: prod
+      - key: PHX_SERVER
+        value: "true"
+      - key: ECTO_SSL
+        value: "true"
+      - key: ECTO_IPV6
+        value: "true"
+      - key: POOL_SIZE
+        value: "5"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nostr-spam-fighter-db
+          property: connectionString
+      - key: SECRET_KEY_BASE
+        generateValue: true
+      - key: PHX_HOST
+        fromService:
+          name: nostr-spam-fighter
+          type: web
+          envVarKey: RENDER_EXTERNAL_HOSTNAME
+      - key: INITIAL_ADMIN_PUBKEY
+        sync: false
+      - key: MODERATION_NSEC
+        sync: false

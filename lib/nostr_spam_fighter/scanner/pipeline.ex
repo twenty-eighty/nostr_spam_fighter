@@ -1,0 +1,212 @@
+defmodule NostrSpamFighter.Scanner.Pipeline do
+  @moduledoc """
+  Event -> processor -> URLs -> redirects -> policy -> evidence -> classifications.
+  Historical scans are immutable.
+  """
+
+  alias NostrSpamFighter.Repo
+  alias NostrSpamFighter.Nostr.Event
+  alias NostrSpamFighter.Policy.Cache
+  alias NostrSpamFighter.Scanner.{Kind30023Processor, RedirectResolver}
+
+  alias NostrSpamFighter.Moderation.{
+    Classification,
+    Match,
+    RedirectHop,
+    Scan,
+    UrlOccurrence,
+    UrlResolution
+  }
+
+  alias NostrSpamFighter.Jobs.PublishLabelWorker
+  alias NostrSpamFighter.Moderation.ArticleState
+
+  @processors %{
+    30_023 => Kind30023Processor
+  }
+
+  def run(event_id, opts \\ []) do
+    event = Repo.get!(Event, event_id)
+    processor = Map.fetch!(@processors, event.kind)
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    generation = Cache.generation()
+    version = Application.get_env(:nostr_spam_fighter, :scanner_version, "1.0.0")
+
+    {:ok, scan} =
+      %Scan{}
+      |> Scan.changeset(%{
+        event_id: event.event_id,
+        policy_generation: generation,
+        status: "running",
+        started_at: now,
+        scanner_version: version
+      })
+      |> Repo.insert()
+
+    try do
+      indicators = processor.extract(event.raw_event)
+      max_urls = Application.get_env(:nostr_spam_fighter, :max_urls_per_event, 50)
+      indicators = Enum.take(indicators, max_urls)
+
+      occurrences = persist_occurrences(scan, indicators)
+      {resolutions, matches} = resolve_and_match(occurrences, opts)
+      classifications = classify(scan, event, matches)
+      status = scan_status(resolutions, matches)
+
+      scan =
+        scan
+        |> Scan.changeset(%{
+          status: status,
+          completed_at: DateTime.utc_now() |> DateTime.truncate(:second),
+          urls_discovered: length(occurrences),
+          urls_resolved: length(resolutions),
+          redirects_followed: Enum.reduce(resolutions, 0, &(&1.redirect_count + &2)),
+          matches_found: length(matches)
+        })
+        |> Repo.update!()
+
+      ArticleState.refresh_for_event(event.event_id)
+      maybe_publish(classifications)
+
+      Phoenix.PubSub.broadcast(
+        NostrSpamFighter.PubSub,
+        "scans",
+        {:scan_completed, scan.id, status}
+      )
+
+      {:ok, scan}
+    rescue
+      error ->
+        scan
+        |> Scan.changeset(%{
+          status: "failed",
+          error: Exception.message(error),
+          completed_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+        |> Repo.update!()
+
+        {:error, error}
+    end
+  end
+
+  defp persist_occurrences(scan, indicators) do
+    Enum.map(indicators, fn ind ->
+      {:ok, occ} =
+        %UrlOccurrence{}
+        |> UrlOccurrence.changeset(Map.put(ind, :scan_id, scan.id))
+        |> Repo.insert()
+
+      occ
+    end)
+  end
+
+  defp resolve_and_match(occurrences, opts) do
+    grouped = Enum.group_by(occurrences, & &1.normalized_url)
+
+    Enum.reduce(grouped, {[], []}, fn {_url, occs}, {res_acc, match_acc} ->
+      primary = hd(occs)
+      result = RedirectResolver.resolve(primary.normalized_url, opts)
+      {resolution, hops} = persist_resolution(primary, result)
+
+      matches =
+        Enum.flat_map(occs, fn occ ->
+          persist_matches(occ, hops, result.matches)
+        end)
+
+      {[resolution | res_acc], matches ++ match_acc}
+    end)
+  end
+
+  defp persist_resolution(occ, result) do
+    {:ok, resolution} =
+      %UrlResolution{}
+      |> UrlResolution.changeset(%{
+        url_occurrence_id: occ.id,
+        status: result.status,
+        final_url: result.final_url,
+        final_hostname: result.final_hostname,
+        http_status: result.http_status,
+        redirect_count: result.redirect_count,
+        duration_ms: result.duration_ms,
+        error: result.error
+      })
+      |> Repo.insert()
+
+    hops =
+      Enum.map(result.hops, fn hop ->
+        {:ok, record} =
+          %RedirectHop{}
+          |> RedirectHop.changeset(
+            Map.put(hop, :url_resolution_id, resolution.id)
+            |> Map.drop([:matches])
+          )
+          |> Repo.insert()
+
+        {record, hop.matches}
+      end)
+
+    {resolution, hops}
+  end
+
+  defp persist_matches(occ, hops, _all_matches) do
+    Enum.flat_map(hops, fn {hop, matches} ->
+      Enum.map(matches, fn rule ->
+        {:ok, match} =
+          %Match{}
+          |> Match.changeset(%{
+            scan_id: occ.scan_id,
+            url_occurrence_id: occ.id,
+            redirect_hop_id: hop.id,
+            category_id: rule.category_id,
+            blocklist_id: rule.blocklist_id,
+            blocklist_version_id: rule.blocklist_version_id,
+            blocklist_entry_id: rule.entry_id,
+            matched_url: hop.url,
+            matched_hostname: hop.hostname,
+            match_type: rule.rule_type
+          })
+          |> Repo.insert()
+
+        match
+      end)
+    end)
+  end
+
+  defp classify(scan, event, matches) do
+    matches
+    |> Enum.uniq_by(& &1.category_id)
+    |> Enum.map(fn match ->
+      {:ok, classification} =
+        %Classification{}
+        |> Classification.changeset(%{
+          scan_id: scan.id,
+          event_id: event.event_id,
+          category_id: match.category_id,
+          status: "current"
+        })
+        |> Repo.insert()
+
+      classification
+    end)
+  end
+
+  defp scan_status(resolutions, matches) do
+    statuses = Enum.map(resolutions, & &1.status)
+    network_fail = Enum.any?(statuses, &(&1 != "completed"))
+
+    cond do
+      matches != [] and network_fail -> "partial"
+      matches != [] -> "matched"
+      network_fail -> "partial"
+      true -> "clean"
+    end
+  end
+
+  defp maybe_publish(classifications) do
+    Enum.each(classifications, fn c ->
+      %{event_id: c.event_id, category_id: c.category_id}
+      |> PublishLabelWorker.new(queue: :nostr_publish)
+      |> Oban.insert()
+    end)
+  end
+end

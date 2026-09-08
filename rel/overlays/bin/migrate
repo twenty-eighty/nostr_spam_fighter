@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+cd -P -- "$(dirname -- "$0")"
+exec ./nostr_spam_fighter eval "NostrSpamFighter.Release.migrate()"

@@ -1,0 +1,15 @@
+.git
+.gitignore
+_build
+deps
+doc
+tmp
+.env
+.env.*
+!/.env.example
+priv/secrets
+test
+assets/node_modules
+erlc_crash.dump
+*.ez
+cover
