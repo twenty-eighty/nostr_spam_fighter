@@ -28,8 +28,9 @@ COPY rel rel
 
 RUN chmod +x rel/overlays/bin/*
 
-RUN mix assets.deploy
+# Colocated CSS/JS is written under _build during compile; assets must run after.
 RUN mix compile
+RUN mix assets.deploy
 RUN mix release
 
 FROM debian:${DEBIAN_VERSION}
