@@ -91,15 +91,7 @@ defmodule NostrSpamFighter.Policy.Cache do
 
   @impl true
   def handle_call({:install, generation, host_domain, url_prefix}, _from, state) do
-    old_hd = host_domain_table()
-    old_url = url_prefix_table()
-
-    :ets.insert(@meta, {:host_domain, host_domain})
-    :ets.insert(@meta, {:url_prefix, url_prefix})
-    :ets.insert(@meta, {:generation, generation})
-    :ets.insert(@meta, {:ready, true})
-
-    Process.send_after(self(), {:retire_tables, old_hd, old_url}, @retire_ms)
+    do_install(generation, host_domain, url_prefix)
     {:reply, :ok, state}
   end
 
@@ -117,7 +109,36 @@ defmodule NostrSpamFighter.Policy.Cache do
   @spec install(non_neg_integer(), :ets.tid(), :ets.tid()) :: :ok
   def install(generation, host_domain, url_prefix)
       when is_integer(generation) and generation >= 0 do
-    GenServer.call(__MODULE__, {:install, generation, host_domain, url_prefix})
+    # Compiler may run inside this GenServer (boot rebuild); never call ourselves.
+    if self() == Process.whereis(__MODULE__) do
+      do_install(generation, host_domain, url_prefix)
+    else
+      GenServer.call(__MODULE__, {:install, generation, host_domain, url_prefix})
+    end
+  end
+
+  defp do_install(generation, host_domain, url_prefix) do
+    old_hd = host_domain_table()
+    old_url = url_prefix_table()
+
+    :ets.insert(@meta, {:host_domain, host_domain})
+    :ets.insert(@meta, {:url_prefix, url_prefix})
+    :ets.insert(@meta, {:generation, generation})
+    :ets.insert(@meta, {:ready, true})
+
+    schedule_retire(old_hd, old_url)
+    :ok
+  end
+
+  defp schedule_retire(host_domain, url_prefix) do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        Process.send_after(pid, {:retire_tables, host_domain, url_prefix}, @retire_ms)
+
+      _ ->
+        delete_table(host_domain)
+        delete_table(url_prefix)
+    end
   end
 
   @doc false
