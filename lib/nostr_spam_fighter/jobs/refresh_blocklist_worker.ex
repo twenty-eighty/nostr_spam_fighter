@@ -22,6 +22,9 @@ defmodule NostrSpamFighter.Jobs.RefreshBlocklistWorker do
       nil ->
         {:error, :not_found}
 
+      %Blocklist{enabled: false} ->
+        {:error, :disabled}
+
       list ->
         if force? or not Blocklist.skip_auto_queue?(list) do
           insert_refresh(blocklist_id)
@@ -52,6 +55,9 @@ defmodule NostrSpamFighter.Jobs.RefreshBlocklistWorker do
   def perform(%Oban.Job{args: %{"blocklist_id" => id}}) do
     case Repo.get(Blocklist, id) do
       nil ->
+        :ok
+
+      %Blocklist{enabled: false} ->
         :ok
 
       %Blocklist{refresh_status: status} when status in ~w(failed rejected) ->

@@ -47,8 +47,30 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Show do
 
   @impl true
   def handle_event("save", %{"blocklist" => params}, socket) do
-    {:ok, list} = Policy.update_blocklist(socket.assigns.blocklist, params)
-    {:noreply, assign(socket, blocklist: list, form: to_form(Policy.change_blocklist(list)))}
+    was_enabled = socket.assigns.blocklist.enabled
+
+    case Policy.update_blocklist(socket.assigns.blocklist, params) do
+      {:ok, list} ->
+        flash =
+          cond do
+            was_enabled and not list.enabled ->
+              "Disabled — removed from policy cache / matching"
+
+            not was_enabled and list.enabled ->
+              "Enabled — reloaded into policy cache"
+
+            true ->
+              "Saved"
+          end
+
+        {:noreply,
+         socket
+         |> assign(blocklist: list, form: to_form(Policy.change_blocklist(list)))
+         |> put_flash(:info, flash)}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, form: to_form(changeset))}
+    end
   end
 
   def handle_event("import", %{"body" => body}, socket) do
@@ -62,12 +84,19 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Show do
   end
 
   def handle_event("refresh", _, socket) do
-    RefreshBlocklistWorker.enqueue(socket.assigns.blocklist.id, force: true)
+    case RefreshBlocklistWorker.enqueue(socket.assigns.blocklist.id, force: true) do
+      :ok ->
+        {:noreply,
+         socket
+         |> assign_blocklist(socket.assigns.blocklist.id)
+         |> put_flash(:info, "Refresh queued")}
 
-    {:noreply,
-     socket
-     |> assign_blocklist(socket.assigns.blocklist.id)
-     |> put_flash(:info, "Refresh queued")}
+      {:error, :disabled} ->
+        {:noreply, put_flash(socket, :error, "Enable the blocklist before refreshing")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not queue refresh")}
+    end
   end
 
   def handle_event("rescan", %{"mode" => mode}, socket) do
@@ -81,7 +110,12 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Show do
     <Layouts.app flash={@flash}>
       <h1 class="text-3xl font-semibold">{@blocklist.name}</h1>
       <p id="blocklist-stats" class="mt-2 opacity-70">
-        {entry_count(@blocklist)} entries · last read {format_read_at(@blocklist)}
+        {entry_count(@blocklist)} entries · last read {format_read_at(@blocklist)} · {if @blocklist.enabled,
+          do: "enabled",
+          else: "disabled"}
+      </p>
+      <p :if={not @blocklist.enabled} class="mt-2 text-sm opacity-70">
+        Disabled lists are kept in the database but excluded from matching and the in-memory policy cache.
       </p>
       <div class="mt-2">
         <.refresh_status
@@ -97,8 +131,13 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Show do
           }
         />
       </div>
-      <.form for={@form} phx-submit="save" class="mt-4 space-y-3 max-w-md">
-        <.input field={@form[:enabled]} type="checkbox" label="Enabled" />
+      <.form
+        for={@form}
+        id="blocklist-settings-form"
+        phx-submit="save"
+        class="mt-4 space-y-3 max-w-md"
+      >
+        <.input field={@form[:enabled]} type="checkbox" label="Enabled (include in policy cache)" />
         <.input field={@form[:source_url]} label="Source URL" />
         <button class="btn btn-primary btn-sm">Save</button>
       </.form>
@@ -107,7 +146,7 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Show do
           id="refresh-blocklist"
           class="btn btn-sm"
           phx-click="refresh"
-          disabled={Blocklist.downloading?(@blocklist)}
+          disabled={Blocklist.downloading?(@blocklist) or not @blocklist.enabled}
         >
           Refresh now
         </button>

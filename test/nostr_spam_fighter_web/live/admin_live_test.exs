@@ -139,6 +139,32 @@ defmodule NostrSpamFighterWeb.AdminLiveTest do
     assert Policy.list_blocklists() == []
   end
 
+  test "blocklist index can disable and enable a list", %{conn: conn} do
+    System.delete_env("INITIAL_ADMIN_PUBKEY")
+    Application.put_env(:nostr_spam_fighter, :initial_admin_pubkey, nil)
+
+    [adult | _] = Policy.ensure_default_categories()
+
+    {:ok, list} =
+      Policy.create_blocklist(%{
+        name: "Toggle me",
+        category_id: adult.id,
+        source_type: "manual",
+        format: "domains",
+        enabled: true
+      })
+
+    {:ok, view, _} = live(conn, ~p"/blocklists")
+    assert has_element?(view, "#blocklist-enabled-#{list.id}", "enabled")
+    assert has_element?(view, "#toggle-blocklist-#{list.id}", "Disable")
+
+    view |> element("#toggle-blocklist-#{list.id}") |> render_click()
+
+    assert has_element?(view, "#blocklist-enabled-#{list.id}", "disabled")
+    assert has_element?(view, "#toggle-blocklist-#{list.id}", "Enable")
+    refute Policy.get_blocklist!(list.id).enabled
+  end
+
   test "remote blocklist shows download progress", %{conn: conn} do
     System.delete_env("INITIAL_ADMIN_PUBKEY")
     Application.put_env(:nostr_spam_fighter, :initial_admin_pubkey, nil)

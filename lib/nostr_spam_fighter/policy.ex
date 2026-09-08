@@ -210,6 +210,14 @@ defmodule NostrSpamFighter.Policy do
     |> maybe_rebuild()
   end
 
+  @doc """
+  Enables or disables a blocklist. Disabled lists are excluded from the policy
+  cache (so they do not consume matcher memory) and are not auto-refreshed.
+  """
+  def set_blocklist_enabled(%Blocklist{} = blocklist, enabled) when is_boolean(enabled) do
+    update_blocklist(blocklist, %{enabled: enabled})
+  end
+
   def change_blocklist(%Blocklist{} = blocklist, attrs \\ %{}) do
     Blocklist.changeset(blocklist, attrs)
   end
@@ -323,7 +331,7 @@ defmodule NostrSpamFighter.Policy do
     end
   end
 
-  defp maybe_enqueue_refresh({:ok, %Blocklist{source_type: "remote"} = blocklist}) do
+  defp maybe_enqueue_refresh({:ok, %Blocklist{source_type: "remote", enabled: true} = blocklist}) do
     NostrSpamFighter.Jobs.RefreshBlocklistWorker.enqueue(blocklist.id)
     {:ok, get_blocklist!(blocklist.id)}
   end

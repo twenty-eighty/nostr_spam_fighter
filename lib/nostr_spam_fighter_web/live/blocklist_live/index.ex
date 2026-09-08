@@ -68,13 +68,42 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Index do
     end
   end
 
-  def handle_event("refresh", %{"id" => id}, socket) do
-    RefreshBlocklistWorker.enqueue(id, force: true)
+  def handle_event("toggle_enabled", %{"id" => id}, socket) do
+    list = Policy.get_blocklist!(id)
 
-    {:noreply,
-     socket
-     |> assign(:blocklists, Policy.list_blocklists())
-     |> put_flash(:info, "Refresh queued")}
+    case Policy.set_blocklist_enabled(list, !list.enabled) do
+      {:ok, updated} ->
+        msg =
+          if updated.enabled do
+            "Enabled #{updated.name} (reloaded into policy cache)"
+          else
+            "Disabled #{updated.name} (removed from policy cache)"
+          end
+
+        {:noreply,
+         socket
+         |> assign(:blocklists, Policy.list_blocklists())
+         |> put_flash(:info, msg)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not update blocklist")}
+    end
+  end
+
+  def handle_event("refresh", %{"id" => id}, socket) do
+    case RefreshBlocklistWorker.enqueue(id, force: true) do
+      :ok ->
+        {:noreply,
+         socket
+         |> assign(:blocklists, Policy.list_blocklists())
+         |> put_flash(:info, "Refresh queued")}
+
+      {:error, :disabled} ->
+        {:noreply, put_flash(socket, :error, "Enable the blocklist before refreshing")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not queue refresh")}
+    end
   end
 
   def handle_event("refresh_remote", _, socket) do
@@ -107,6 +136,8 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Index do
       <h1 class="text-3xl font-semibold">Blocklists</h1>
       <p class="mt-2 opacity-70">
         Remote lists are fetched when created, then every 5 minutes when due.
+        Disable lists you do not need — disabled lists stay in the database but are
+        excluded from matching and the in-memory policy cache.
       </p>
       <button id="refresh-remote" class="btn btn-sm mt-4" type="button" phx-click="refresh_remote">
         Refresh remote lists
@@ -115,14 +146,36 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Index do
         <li
           :for={list <- @blocklists}
           id={"blocklist-#{list.id}"}
-          class="flex flex-wrap items-center gap-3"
+          class={[
+            "flex flex-wrap items-center gap-3",
+            !list.enabled && "opacity-60"
+          ]}
         >
           <.link navigate={~p"/blocklists/#{list.id}"} class="link">{list.name}</.link>
           <span>({list.category && list.category.slug}) {list.source_type}/{list.format}</span>
+          <span
+            id={"blocklist-enabled-#{list.id}"}
+            class={[
+              "badge badge-sm",
+              list.enabled && "badge-success",
+              !list.enabled && "badge-ghost"
+            ]}
+          >
+            {if list.enabled, do: "enabled", else: "disabled"}
+          </span>
           <span id={"blocklist-stats-#{list.id}"} class="opacity-70">
             {entry_count(list)} entries · last read {format_read_at(list)}
           </span>
           <.refresh_status list={list} progress={progress_for(@download_progress, list)} />
+          <button
+            id={"toggle-blocklist-#{list.id}"}
+            class="btn btn-xs"
+            type="button"
+            phx-click="toggle_enabled"
+            phx-value-id={list.id}
+          >
+            {if list.enabled, do: "Disable", else: "Enable"}
+          </button>
           <button
             :if={list.source_type == "remote"}
             id={"refresh-blocklist-#{list.id}"}
@@ -130,7 +183,7 @@ defmodule NostrSpamFighterWeb.BlocklistLive.Index do
             type="button"
             phx-click="refresh"
             phx-value-id={list.id}
-            disabled={Blocklist.downloading?(list)}
+            disabled={Blocklist.downloading?(list) or not list.enabled}
           >
             Refresh
           </button>
