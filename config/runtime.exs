@@ -48,8 +48,9 @@ config :nostr_spam_fighter,
   request_timeout_ms: String.to_integer(System.get_env("REQUEST_TIMEOUT_MS") || "10000"),
   url_timeout_ms: String.to_integer(System.get_env("URL_TIMEOUT_MS") || "20000"),
   max_urls_per_event: String.to_integer(System.get_env("MAX_URLS_PER_EVENT") || "50"),
-  http_concurrency: String.to_integer(System.get_env("HTTP_CONCURRENCY") || "20"),
-  per_host_concurrency: String.to_integer(System.get_env("PER_HOST_CONCURRENCY") || "4"),
+  max_url_bytes: String.to_integer(System.get_env("MAX_URL_BYTES") || "4096"),
+  http_concurrency: String.to_integer(System.get_env("HTTP_CONCURRENCY") || "4"),
+  per_host_concurrency: String.to_integer(System.get_env("PER_HOST_CONCURRENCY") || "2"),
   batch_moderation_limit: String.to_integer(System.get_env("BATCH_MODERATION_LIMIT") || "500"),
   ingest_since_s: String.to_integer(System.get_env("INGEST_SINCE_S") || "86400"),
   ingest_limit: String.to_integer(System.get_env("INGEST_LIMIT") || "300"),
@@ -59,7 +60,12 @@ config :nostr_spam_fighter,
   blocklist_connect_timeout_ms:
     String.to_integer(System.get_env("BLOCKLIST_CONNECT_TIMEOUT_MS") || "15000"),
   blocklist_receive_timeout_ms:
-    String.to_integer(System.get_env("BLOCKLIST_RECEIVE_TIMEOUT_MS") || "120000")
+    String.to_integer(System.get_env("BLOCKLIST_RECEIVE_TIMEOUT_MS") || "120000"),
+  blocklist_max_bytes: String.to_integer(System.get_env("BLOCKLIST_MAX_BYTES") || "8000000")
+
+if memory_limit = System.get_env("MEMORY_LIMIT_BYTES") do
+  config :nostr_spam_fighter, memory_limit_bytes: String.to_integer(memory_limit)
+end
 
 if config_env() == :prod do
   unless NostrSpamFighter.Accounts.valid_admin_pubkey?(System.get_env("INITIAL_ADMIN_PUBKEY")) do

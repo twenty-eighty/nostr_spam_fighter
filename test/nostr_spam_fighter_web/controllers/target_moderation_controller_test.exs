@@ -74,13 +74,13 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
   } do
     assert {:ok, _} = Importer.import_manual(list, "evil.com\nlocalhost\n")
 
-    Bypass.expect(bypass, "GET", "/safe", fn conn ->
+    Bypass.expect(bypass, "HEAD", "/safe", fn conn ->
       conn
       |> Plug.Conn.put_resp_header("location", "http://localhost:#{bypass.port}/blocked")
       |> Plug.Conn.resp(302, "")
     end)
 
-    Bypass.expect(bypass, "GET", "/blocked", fn conn ->
+    Bypass.expect(bypass, "HEAD", "/blocked", fn conn ->
       Plug.Conn.resp(conn, 200, "ok")
     end)
 
@@ -100,7 +100,7 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
   end
 
   test "clean url with successful fetch stays clean", %{conn: conn, bypass: bypass, base: base} do
-    Bypass.expect(bypass, "GET", "/ok", fn conn ->
+    Bypass.expect(bypass, "HEAD", "/ok", fn conn ->
       Plug.Conn.resp(conn, 200, "ok")
     end)
 
@@ -119,6 +119,13 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => "not-a-url"}), 400)[
              "error"
            ] == "invalid url"
+  end
+
+  test "oversized url is 400", %{conn: conn} do
+    url = "https://example.com/" <> String.duplicate("a", 4_100)
+
+    assert json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => url}), 400)["error"] ==
+             "url too long"
   end
 
   test "requires bearer api key", %{conn: conn} do

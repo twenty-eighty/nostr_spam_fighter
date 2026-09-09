@@ -22,17 +22,21 @@ config :nostr_spam_fighter,
   request_timeout_ms: 10_000,
   url_timeout_ms: 20_000,
   max_urls_per_event: 50,
-  http_concurrency: 20,
-  per_host_concurrency: 4,
+  http_concurrency: 4,
+  per_host_concurrency: 2,
   max_content_bytes: 512_000,
   max_tags: 200,
   max_tag_length: 2_048,
+  max_url_bytes: 4_096,
+  max_redirect_location_bytes: 2_048,
+  memory_pressure: true,
+  memory_pressure_ratio: 0.75,
   batch_moderation_limit: 500,
   on_demand_idle_ms: 3_000,
   on_demand_timeout_ms: 10_000,
   blocklist_connect_timeout_ms: 15_000,
   blocklist_receive_timeout_ms: 120_000,
-  blocklist_max_bytes: 70_000_000,
+  blocklist_max_bytes: 8_000_000,
   blocklist_max_entries: 5_000_000,
   policy_cache_max_entries: 100_000,
   api_rate_limit: [scale_ms: 60_000, limit: 120, burst: 30],
@@ -45,11 +49,11 @@ config :nostr_spam_fighter,
 config :nostr_spam_fighter, Oban,
   repo: NostrSpamFighter.Repo,
   queues: [
-    scans: 2,
-    network: 4,
+    scans: 1,
+    network: 2,
     blocklists: 1,
-    nostr_publish: 4,
-    maintenance: 2
+    nostr_publish: 2,
+    maintenance: 1
   ],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
@@ -108,6 +112,8 @@ config :tailwind,
   ]
 
 # Configure Elixir's Logger
+config :logger, truncate: 2_048
+
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]

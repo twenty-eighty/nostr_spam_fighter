@@ -49,6 +49,8 @@ RUN chown nobody /app
 
 ENV MIX_ENV=prod
 ENV PHX_SERVER=true
+# Override with ERL_FLAGS at runtime if the instance is larger than 512 MB.
+ENV ERL_FLAGS="+S 2:2 +sbwt none +sbwtdcpu none +sbwtdio none"
 
 COPY --from=build --chown=nobody:root /app/_build/prod/rel/nostr_spam_fighter ./
 

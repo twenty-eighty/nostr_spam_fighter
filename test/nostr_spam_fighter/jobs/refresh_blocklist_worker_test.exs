@@ -154,9 +154,30 @@ defmodule NostrSpamFighter.Jobs.RefreshBlocklistWorkerTest do
     assert list.last_error == "timed out after 15 minutes"
   end
 
+  test "snoozes refresh when memory is tight", %{list: list} do
+    prev_pressure = Application.get_env(:nostr_spam_fighter, :memory_pressure, :unset)
+    prev_fun = Application.get_env(:nostr_spam_fighter, :memory_usage_fun, :unset)
+    prev_limit = Application.get_env(:nostr_spam_fighter, :memory_limit_bytes, :unset)
+
+    Application.put_env(:nostr_spam_fighter, :memory_pressure, true)
+    Application.put_env(:nostr_spam_fighter, :memory_usage_fun, fn -> 100 end)
+    Application.put_env(:nostr_spam_fighter, :memory_limit_bytes, 10)
+
+    on_exit(fn ->
+      restore_env(:memory_pressure, prev_pressure)
+      restore_env(:memory_usage_fun, prev_fun)
+      restore_env(:memory_limit_bytes, prev_limit)
+    end)
+
+    assert {:snooze, 30} = perform_job(RefreshBlocklistWorker, %{blocklist_id: list.id})
+  end
+
   test "explains timeout errors" do
     message = BlocklistDownloader.format_exception(%{reason: :timeout}, 15_000, 120_000)
     assert message == "timed out after 120s waiting for the server"
     assert BlocklistDownloader.format_exception(%{reason: :nxdomain}) == "DNS lookup failed"
   end
+
+  defp restore_env(key, :unset), do: Application.delete_env(:nostr_spam_fighter, key)
+  defp restore_env(key, value), do: Application.put_env(:nostr_spam_fighter, key, value)
 end

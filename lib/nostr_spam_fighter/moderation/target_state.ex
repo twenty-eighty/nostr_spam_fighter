@@ -34,16 +34,22 @@ defmodule NostrSpamFighter.Moderation.TargetState do
 
   def lookup_domain(_), do: {:error, :invalid_domain}
 
-  @spec lookup_url(String.t()) :: {:ok, map()} | {:error, :invalid_url}
+  @spec lookup_url(String.t()) :: {:ok, map()} | {:error, :invalid_url | :url_too_long}
   def lookup_url(url) when is_binary(url) do
-    with {:ok, normalized} <- Normalizer.normalize_url(url),
-         host when is_binary(host) <- Normalizer.hostname_from_url(normalized),
-         registrable when is_binary(registrable) and registrable != "" <-
-           PublicSuffix.registrable_domain(host) do
-      resolution = RedirectResolver.resolve(normalized, resolve_opts())
-      {:ok, present_url(host, registrable, normalized, resolution)}
-    else
-      _ -> {:error, :invalid_url}
+    cond do
+      byte_size(url) > max_url_bytes() ->
+        {:error, :url_too_long}
+
+      true ->
+        with {:ok, normalized} <- Normalizer.normalize_url(url),
+             host when is_binary(host) <- Normalizer.hostname_from_url(normalized),
+             registrable when is_binary(registrable) and registrable != "" <-
+               PublicSuffix.registrable_domain(host) do
+          resolution = RedirectResolver.resolve(normalized, resolve_opts())
+          {:ok, present_url(host, registrable, normalized, resolution)}
+        else
+          _ -> {:error, :invalid_url}
+        end
     end
   end
 
@@ -128,6 +134,10 @@ defmodule NostrSpamFighter.Moderation.TargetState do
       order_by: c.slug
     )
     |> Repo.all()
+  end
+
+  defp max_url_bytes do
+    Application.get_env(:nostr_spam_fighter, :max_url_bytes, 4_096)
   end
 
   defp resolve_opts do

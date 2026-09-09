@@ -27,7 +27,7 @@ config :swoosh, api_client: Swoosh.ApiClient.Req
 config :swoosh, local: false
 
 # Do not print debug messages in production
-config :logger, level: :info
+config :logger, level: :info, truncate: 2_048
 
 # Always require admin login in production, even if the pubkey env is cleared later.
 config :nostr_spam_fighter, require_admin_auth: true

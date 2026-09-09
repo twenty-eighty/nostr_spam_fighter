@@ -4,4 +4,6 @@ set -eu
 cd -P -- "$(dirname -- "$0")"
 ./nostr_spam_fighter eval "NostrSpamFighter.Release.migrate()"
 ./nostr_spam_fighter eval "NostrSpamFighter.Release.bootstrap_admin()"
+# Small Render instances (512 MB) OOM when BEAM starts too many schedulers.
+export ERL_FLAGS="${ERL_FLAGS:-+S 2:2 +sbwt none +sbwtdcpu none +sbwtdio none}"
 PHX_SERVER=true exec ./nostr_spam_fighter start

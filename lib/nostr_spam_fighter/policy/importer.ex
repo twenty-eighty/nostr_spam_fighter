@@ -16,7 +16,7 @@ defmodule NostrSpamFighter.Policy.Importer do
     PublicSuffix
   }
 
-  @max_bytes 70_000_000
+  @max_bytes 8_000_000
   @max_entries 5_000_000
   @insert_chunk 2_000
   @max_decrease_ratio 0.5

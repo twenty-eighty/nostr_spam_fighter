@@ -33,16 +33,27 @@ defmodule NostrSpamFighter.Nostr.IngestQueue do
   def handle_cast({:enqueue, event, relay_url}, state) do
     max_queue = Application.get_env(:nostr_spam_fighter, :ingest_max_queue, 2_000)
 
-    if :queue.len(state.queue) >= max_queue do
-      Logger.warning("ingest queue full, dropping event")
+    cond do
+      NostrSpamFighter.Memory.tight?() ->
+        Logger.warning("ingest dropped, memory pressure")
 
-      :telemetry.execute([:nostr_spam_fighter, :ingest, :dropped], %{count: 1}, %{
-        reason: :queue_full
-      })
+        :telemetry.execute([:nostr_spam_fighter, :ingest, :dropped], %{count: 1}, %{
+          reason: :memory_pressure
+        })
 
-      {:noreply, state}
-    else
-      {:noreply, pump(%{state | queue: :queue.in({event, relay_url}, state.queue)})}
+        {:noreply, state}
+
+      :queue.len(state.queue) >= max_queue ->
+        Logger.warning("ingest queue full, dropping event")
+
+        :telemetry.execute([:nostr_spam_fighter, :ingest, :dropped], %{count: 1}, %{
+          reason: :queue_full
+        })
+
+        {:noreply, state}
+
+      true ->
+        {:noreply, pump(%{state | queue: :queue.in({event, relay_url}, state.queue)})}
     end
   end
 

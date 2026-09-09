@@ -50,5 +50,6 @@ config :nostr_spam_fighter,
   ingest_startup_delay_ms: 0,
   registrable_domain_backfill: false,
   allow_loopback_redirects: true,
+  memory_pressure: false,
   http_adapter: NostrSpamFighter.Scanner.HTTP.BypassAdapter,
   event_fetcher: {NostrSpamFighter.Nostr.EventFetcher, :noop, []}

@@ -71,6 +71,13 @@ defmodule NostrSpamFighterWeb.LookupLiveTest do
     assert has_element?(view, "#lookup-error", "That doesn't look like a valid domain.")
   end
 
+  test "oversized queries are rejected", %{conn: conn} do
+    {:ok, view, _} = live(conn, ~p"/lookup")
+    render_submit(form(view, "#lookup-form", lookup: %{query: String.duplicate("a", 5_000)}))
+    assert has_element?(view, "#lookup-error", "That value is too long to look up.")
+    refute has_element?(view, "#lookup-result")
+  end
+
   test "url lookup follows redirects and reports matching lists", %{
     conn: conn,
     list: list,
@@ -79,13 +86,13 @@ defmodule NostrSpamFighterWeb.LookupLiveTest do
   } do
     assert {:ok, _} = Importer.import_manual(list, "evil.com\n127.0.0.1\n")
 
-    Bypass.expect(bypass, "GET", "/from", fn conn ->
+    Bypass.expect(bypass, "HEAD", "/from", fn conn ->
       conn
       |> Plug.Conn.put_resp_header("location", base <> "/to")
       |> Plug.Conn.resp(302, "")
     end)
 
-    Bypass.expect(bypass, "GET", "/to", fn conn ->
+    Bypass.expect(bypass, "HEAD", "/to", fn conn ->
       Plug.Conn.resp(conn, 200, "ok")
     end)
 

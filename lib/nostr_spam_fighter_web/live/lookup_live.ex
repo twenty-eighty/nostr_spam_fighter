@@ -239,12 +239,19 @@ defmodule NostrSpamFighterWeb.LookupLive do
       query == "" ->
         {:error, :empty}
 
+      byte_size(query) > max_url_bytes() ->
+        {:error, :url_too_long}
+
       url?(query) ->
         {:url, ensure_scheme(query)}
 
       true ->
         {:domain, query}
     end
+  end
+
+  defp max_url_bytes do
+    Application.get_env(:nostr_spam_fighter, :max_url_bytes, 4_096)
   end
 
   defp url?(query) do
@@ -262,6 +269,7 @@ defmodule NostrSpamFighterWeb.LookupLive do
   defp error_message(:empty), do: "Enter a domain or URL."
   defp error_message(:invalid_domain), do: "That doesn't look like a valid domain."
   defp error_message(:invalid_url), do: "That doesn't look like a valid URL."
+  defp error_message(:url_too_long), do: "That value is too long to look up."
   defp error_message(:lookup_failed), do: "Lookup failed. Try again."
   defp error_message(_), do: "Could not check that value."
 

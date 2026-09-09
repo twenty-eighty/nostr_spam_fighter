@@ -53,6 +53,14 @@ defmodule NostrSpamFighter.Jobs.RefreshBlocklistWorker do
 
   @impl true
   def perform(%Oban.Job{args: %{"blocklist_id" => id}}) do
+    if NostrSpamFighter.Memory.tight?() do
+      {:snooze, 30}
+    else
+      do_perform(id)
+    end
+  end
+
+  defp do_perform(id) do
     case Repo.get(Blocklist, id) do
       nil ->
         :ok

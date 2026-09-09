@@ -25,6 +25,9 @@ defmodule NostrSpamFighterWeb.TargetModerationController do
           {:ok, result} ->
             respond(conn, result)
 
+          {:error, :url_too_long} ->
+            conn |> put_status(:bad_request) |> json(%{error: "url too long"})
+
           {:error, :invalid_url} ->
             conn |> put_status(:bad_request) |> json(%{error: "invalid url"})
         end
