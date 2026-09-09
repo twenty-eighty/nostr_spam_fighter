@@ -8,7 +8,7 @@ defmodule NostrSpamFighter.Policy.Compiler do
   @stream_chunk 2_000
 
   def compile do
-    {host_domain, url_prefix} = Cache.new_tables()
+    domains = Cache.new_domains_table()
 
     try do
       Repo.transaction(
@@ -16,7 +16,7 @@ defmodule NostrSpamFighter.Policy.Compiler do
           rules_query()
           |> Repo.stream(max_rows: @stream_chunk)
           |> Stream.each(fn rule ->
-            Cache.insert_rule(host_domain, url_prefix, rule)
+            Cache.insert_rule(domains, rule)
           end)
           |> Stream.run()
         end,
@@ -25,16 +25,16 @@ defmodule NostrSpamFighter.Policy.Compiler do
       |> case do
         {:ok, _} ->
           generation = bump_generation()
-          Cache.install(generation, host_domain, url_prefix)
+          Cache.install(generation, domains)
           {:ok, generation}
 
         {:error, reason} ->
-          delete_tables(host_domain, url_prefix)
+          delete_table(domains)
           {:error, reason}
       end
     rescue
       error ->
-        delete_tables(host_domain, url_prefix)
+        delete_table(domains)
         {:error, error}
     end
   end
@@ -47,15 +47,14 @@ defmodule NostrSpamFighter.Policy.Compiler do
       where: c.enabled == true,
       where: b.enabled == true,
       where: b.active_version_id == v.id,
+      where: e.rule_type in ^["host", "domain"],
       select: %{
         entry_id: e.id,
         rule_type: e.rule_type,
         normalized_value: e.normalized_value,
         blocklist_id: b.id,
         blocklist_version_id: v.id,
-        category_id: c.id,
-        category_slug: c.slug,
-        blocks_serving: c.blocks_serving
+        category_id: c.id
       }
     )
   end
@@ -82,9 +81,8 @@ defmodule NostrSpamFighter.Policy.Compiler do
     next
   end
 
-  defp delete_tables(host_domain, url_prefix) do
-    if :ets.info(host_domain) != :undefined, do: :ets.delete(host_domain)
-    if :ets.info(url_prefix) != :undefined, do: :ets.delete(url_prefix)
+  defp delete_table(tid) do
+    if :ets.info(tid) != :undefined, do: :ets.delete(tid)
   rescue
     ArgumentError -> :ok
   end

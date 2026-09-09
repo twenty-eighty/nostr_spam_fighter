@@ -29,7 +29,28 @@ defmodule NostrSpamFighter.Policy.MatcherTest do
 
     matches = Matcher.match_target("https://ads.evil.com/x", "ads.evil.com")
     assert Enum.any?(matches, &(&1.normalized_value == "evil.com"))
+    assert Enum.any?(matches, &(&1.category_id == category.id))
 
     assert Matcher.match_target("https://notevil.com", "notevil.com") == []
+  end
+
+  test "registrable-domain collapse treats subdomain listings as the apex domain" do
+    {:ok, category} =
+      Policy.create_category(%{slug: "adult", name: "Adult", enabled: true, blocks_serving: true})
+
+    {:ok, list} =
+      Policy.create_blocklist(%{
+        category_id: category.id,
+        name: "adult-hosts",
+        source_type: "manual",
+        format: "domains"
+      })
+
+    assert {:ok, _} = Importer.import_manual(list, "cdn.blocked.example\n")
+    assert {:ok, _} = Cache.rebuild()
+
+    # Listed subdomain collapses to blocked.example; other hosts under it match.
+    matches = Matcher.match_target("https://www.blocked.example/x", "www.blocked.example")
+    assert Enum.any?(matches, &(&1.normalized_value == "blocked.example"))
   end
 end
