@@ -3,6 +3,8 @@ defmodule NostrSpamFighter.Nostr.Ingestor do
   Deduplicates events, records relay provenance, and enqueues scans.
   """
 
+  require Logger
+
   alias NostrSpamFighter.Repo
   alias NostrSpamFighter.Nostr.{Event, EventRelay, EventValidator}
   alias NostrSpamFighter.Jobs.ScanEventWorker
@@ -38,33 +40,49 @@ defmodule NostrSpamFighter.Nostr.Ingestor do
           existing
 
         true ->
-          {:ok, inserted} =
-            %Event{}
-            |> Event.changeset(%{
-              event_id: event["id"],
-              kind: event["kind"],
-              pubkey: event["pubkey"],
-              created_at: event["created_at"],
-              d_tag: event["d_tag"],
-              article_address: event["article_address"],
-              raw_event: event,
-              first_seen_at: now,
-              last_seen_at: now
-            })
-            |> Repo.insert()
+          case insert_event(event, now) do
+            {:ok, inserted} ->
+              record_relay(event["id"], relay_url)
+              maybe_update_address(inserted)
 
-          record_relay(event["id"], relay_url)
-          maybe_update_address(inserted)
+              if Keyword.get(opts, :enqueue_scan, true) do
+                enqueue_scan(inserted.event_id)
+              end
 
-          if Keyword.get(opts, :enqueue_scan, true) do
-            enqueue_scan(inserted.event_id)
+              maybe_broadcast_ingested(inserted.event_id)
+
+              inserted
+
+            {:error, changeset} ->
+              Repo.rollback(changeset)
           end
-
-          maybe_broadcast_ingested(inserted.event_id)
-
-          inserted
       end
     end)
+  rescue
+    exception ->
+      Logger.warning("ingest persist failed: #{Exception.message(exception)}")
+
+      :telemetry.execute([:nostr_spam_fighter, :ingest, :rejected], %{count: 1}, %{
+        reason: :persist_failed
+      })
+
+      {:error, :persist_failed}
+  end
+
+  defp insert_event(event, now) do
+    %Event{}
+    |> Event.changeset(%{
+      event_id: event["id"],
+      kind: event["kind"],
+      pubkey: event["pubkey"],
+      created_at: event["created_at"],
+      d_tag: event["d_tag"],
+      article_address: event["article_address"],
+      raw_event: event,
+      first_seen_at: now,
+      last_seen_at: now
+    })
+    |> Repo.insert()
   end
 
   defp record_relay(event_id, relay_url) when is_binary(relay_url) do
