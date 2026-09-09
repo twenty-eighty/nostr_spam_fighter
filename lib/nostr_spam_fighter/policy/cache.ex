@@ -130,7 +130,9 @@ defmodule NostrSpamFighter.Policy.Cache do
         where: b.enabled == true,
         where: b.active_version_id == v.id,
         where: e.rule_type in ^["host", "domain"],
-        where: e.registrable_domain == ^domain,
+        where:
+          e.registrable_domain == ^domain or
+            (is_nil(e.registrable_domain) and e.normalized_value == ^domain),
         select: {
           c.id,
           b.id,

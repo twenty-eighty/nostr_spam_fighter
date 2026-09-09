@@ -16,7 +16,12 @@ defmodule NostrSpamFighter.Application do
          query: Application.get_env(:nostr_spam_fighter, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: NostrSpamFighter.PubSub},
         {Oban, Application.fetch_env!(:nostr_spam_fighter, Oban)},
-        {Task, &NostrSpamFighter.Policy.restart_blocklist_refreshes/0},
+        Supervisor.child_spec({Task, &NostrSpamFighter.Policy.restart_blocklist_refreshes/0},
+          id: :restart_blocklist_refreshes
+        ),
+        Supervisor.child_spec({Task, &schedule_registrable_domain_backfill/0},
+          id: :registrable_domain_backfill
+        ),
         NostrSpamFighter.Accounts.RateLimiter,
         NostrSpamFighter.Policy.Cache,
         NostrSpamFighter.Accounts.ReplayCache,
@@ -53,5 +58,15 @@ defmodule NostrSpamFighter.Application do
     else
       []
     end
+  end
+
+  defp schedule_registrable_domain_backfill do
+    if Application.get_env(:nostr_spam_fighter, :registrable_domain_backfill, true) do
+      # Let the endpoint bind before touching millions of rows.
+      Process.sleep(5_000)
+      _ = NostrSpamFighter.Policy.RegistrableDomainBackfill.run()
+    end
+
+    :ok
   end
 end

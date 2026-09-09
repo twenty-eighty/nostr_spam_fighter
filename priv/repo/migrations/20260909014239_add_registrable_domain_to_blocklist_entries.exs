@@ -1,52 +1,23 @@
 defmodule NostrSpamFighter.Repo.Migrations.AddRegistrableDomainToBlocklistEntries do
   use Ecto.Migration
 
-  import Ecto.Query
-
+  # Schema only. Backfill runs after boot via
+  # `NostrSpamFighter.Policy.RegistrableDomainBackfill` so migrate can finish
+  # before Render's port-scan timeout (large lists are millions of rows).
   def up do
-    alter table(:blocklist_entries) do
-      add :registrable_domain, :text
-    end
+    execute("""
+    ALTER TABLE blocklist_entries
+    ADD COLUMN IF NOT EXISTS registrable_domain text
+    """)
 
-    create index(:blocklist_entries, [:registrable_domain])
-
-    flush()
-
-    backfill_registrable_domains()
+    execute("""
+    CREATE INDEX IF NOT EXISTS blocklist_entries_registrable_domain_index
+    ON blocklist_entries (registrable_domain)
+    """)
   end
 
   def down do
-    drop_if_exists index(:blocklist_entries, [:registrable_domain])
-
-    alter table(:blocklist_entries) do
-      remove :registrable_domain
-    end
-  end
-
-  defp backfill_registrable_domains do
-    alias NostrSpamFighter.Repo
-    alias NostrSpamFighter.Policy.PublicSuffix
-
-    Repo.transaction(
-      fn ->
-        from(e in "blocklist_entries",
-          where: e.rule_type in ^["host", "domain"],
-          where: is_nil(e.registrable_domain),
-          select: %{id: e.id, normalized_value: e.normalized_value}
-        )
-        |> Repo.stream(max_rows: 2_000)
-        |> Stream.chunk_every(500)
-        |> Enum.each(fn chunk ->
-          Enum.each(chunk, fn row ->
-            domain =
-              PublicSuffix.registrable_domain(row.normalized_value) || row.normalized_value
-
-            from(e in "blocklist_entries", where: e.id == ^row.id)
-            |> Repo.update_all(set: [registrable_domain: domain])
-          end)
-        end)
-      end,
-      timeout: :infinity
-    )
+    execute("DROP INDEX IF EXISTS blocklist_entries_registrable_domain_index")
+    execute("ALTER TABLE blocklist_entries DROP COLUMN IF EXISTS registrable_domain")
   end
 end

@@ -67,6 +67,22 @@ defmodule NostrSpamFighter.Release do
     count
   end
 
+  @doc """
+  Backfills `registrable_domain` on blocklist entries. Safe to re-run.
+
+      bin/nostr_spam_fighter eval 'NostrSpamFighter.Release.backfill_registrable_domains()'
+  """
+  def backfill_registrable_domains do
+    load_app()
+
+    {:ok, result, _} =
+      Ecto.Migrator.with_repo(NostrSpamFighter.Repo, fn _repo ->
+        NostrSpamFighter.Policy.RegistrableDomainBackfill.run()
+      end)
+
+    result
+  end
+
   defp repos do
     Application.fetch_env!(@app, :ecto_repos)
   end

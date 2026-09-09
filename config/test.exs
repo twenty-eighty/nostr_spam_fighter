@@ -48,5 +48,6 @@ config :nostr_spam_fighter, Oban, testing: :manual, queues: false, plugins: fals
 config :nostr_spam_fighter,
   ingest_enabled: false,
   ingest_startup_delay_ms: 0,
+  registrable_domain_backfill: false,
   http_adapter: NostrSpamFighter.Scanner.HTTP.BypassAdapter,
   event_fetcher: {NostrSpamFighter.Nostr.EventFetcher, :noop, []}
