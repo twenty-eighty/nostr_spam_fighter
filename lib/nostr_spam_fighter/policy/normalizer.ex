@@ -18,6 +18,11 @@ defmodule NostrSpamFighter.Policy.Normalizer do
 
   @spec normalize_url(String.t()) :: {:ok, String.t()} | {:error, atom()}
   def normalize_url(url) when is_binary(url) do
+    url =
+      url
+      |> String.trim()
+      |> then(&Regex.replace(~r/[\\).,;:!?'"\]]+$/, &1, ""))
+
     with {:ok, uri} <- parse_http_uri(url),
          {:ok, host} <- normalize_host(uri.host) do
       path = uri.path || "/"

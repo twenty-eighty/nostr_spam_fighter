@@ -22,4 +22,17 @@ defmodule NostrSpamFighter.Scanner.UrlExtractorTest do
     assert "https://html.example.com/c.jpg" in urls
     assert "https://bare.example.com/q" in urls
   end
+
+  test "strips markdown escape backslashes from extracted urls" do
+    event = %{
+      "tags" => [],
+      "content" =>
+        "![x](https://cdn.example.com/a.webp\\)\nSee https://cdn.example.com/b.webp\\ next\n"
+    }
+
+    urls = UrlExtractor.extract(event) |> Enum.map(& &1.normalized_url) |> Enum.uniq()
+    assert "https://cdn.example.com/a.webp" in urls
+    assert "https://cdn.example.com/b.webp" in urls
+    refute Enum.any?(urls, &String.contains?(&1, "\\"))
+  end
 end

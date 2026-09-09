@@ -3,11 +3,13 @@ defmodule NostrSpamFighter.Scanner.UrlExtractor do
   Extracts HTTP/HTTPS URLs from kind 30023 events.
   """
 
-  @url_regex ~r/https?:\/\/[^\s<>\[\]()"']+/i
-  @md_image ~r/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/i
-  @md_link ~r/(?<!!)\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/i
+  # Exclude markdown/JSON punctuation so bare matches do not swallow escapes like `file.webp\`.
+  @url_regex ~r/https?:\/\/[^\s<>\[\]()"'\\`]+/i
+  @md_image ~r/!\[[^\]]*\]\((https?:\/\/[^)\s]+)/i
+  @md_link ~r/(?<!!)\[[^\]]*\]\((https?:\/\/[^)\s]+)/i
   @autolink ~r/<(https?:\/\/[^>]+)>/i
   @html_attr ~r/(?:src|href)\s*=\s*["'](https?:\/\/[^"']+)["']/i
+  @trailing_junk ~r/[\\).,;:!?'"\]]+$/
 
   @spec extract(map()) :: [map()]
   def extract(event) when is_map(event) do
@@ -50,7 +52,7 @@ defmodule NostrSpamFighter.Scanner.UrlExtractor do
   end
 
   defp occurrence(url, source_type, source_location) do
-    url = url |> String.trim() |> String.trim_trailing(").,;]")
+    url = clean_url(url)
 
     case NostrSpamFighter.Policy.Normalizer.normalize_url(url) do
       {:ok, normalized} ->
@@ -67,5 +69,11 @@ defmodule NostrSpamFighter.Scanner.UrlExtractor do
       _ ->
         []
     end
+  end
+
+  defp clean_url(url) when is_binary(url) do
+    url
+    |> String.trim()
+    |> then(&Regex.replace(@trailing_junk, &1, ""))
   end
 end

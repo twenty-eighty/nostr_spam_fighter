@@ -38,4 +38,9 @@ defmodule NostrSpamFighter.Policy.NormalizerTest do
     assert {:error, :invalid_url} = Normalizer.normalize_url("javascript:alert(1)")
     assert {:error, :invalid_url} = Normalizer.normalize_url("file:///etc/passwd")
   end
+
+  test "strips trailing markdown escape backslashes" do
+    assert {:ok, "https://cdn.example.com/a.webp"} =
+             Normalizer.normalize_url("https://cdn.example.com/a.webp\\")
+  end
 end
