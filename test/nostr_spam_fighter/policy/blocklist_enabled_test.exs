@@ -18,7 +18,6 @@ defmodule NostrSpamFighter.Policy.BlocklistEnabledTest do
       })
 
     assert {:ok, _} = Importer.import_manual(list, "evil.com\n")
-    assert {:ok, _} = Cache.rebuild()
 
     {:ok, list: Policy.get_blocklist!(list.id)}
   end
@@ -28,8 +27,8 @@ defmodule NostrSpamFighter.Policy.BlocklistEnabledTest do
 
     assert {:ok, disabled} = Policy.set_blocklist_enabled(list, false)
     refute disabled.enabled
-    assert Matcher.match_target("https://ads.evil.com", "ads.evil.com") == []
     assert Cache.size() == 0
+    assert Matcher.match_target("https://ads.evil.com", "ads.evil.com") == []
 
     assert {:error, :disabled} = RefreshBlocklistWorker.enqueue(list.id, force: true)
 

@@ -6,7 +6,15 @@ defmodule NostrSpamFighter.Policy.Importer do
   import Ecto.Query
   require Logger
   alias NostrSpamFighter.Repo
-  alias NostrSpamFighter.Policy.{Blocklist, BlocklistEntry, BlocklistVersion, Cache, Normalizer}
+
+  alias NostrSpamFighter.Policy.{
+    Blocklist,
+    BlocklistEntry,
+    BlocklistVersion,
+    Cache,
+    Normalizer,
+    PublicSuffix
+  }
 
   @max_bytes 70_000_000
   @max_entries 5_000_000
@@ -254,11 +262,17 @@ defmodule NostrSpamFighter.Policy.Importer do
   end
 
   defp entry_row(entry, version_id, now) do
+    registrable =
+      if entry.rule_type in ["host", "domain"] do
+        PublicSuffix.registrable_domain(entry.normalized_value) || entry.normalized_value
+      end
+
     %{
       id: Ecto.UUID.generate(),
       blocklist_version_id: version_id,
       rule_type: entry.rule_type,
       normalized_value: entry.normalized_value,
+      registrable_domain: registrable,
       inserted_at: now,
       updated_at: now
     }

@@ -1,23 +1,24 @@
 defmodule NostrSpamFighter.Policy.Cache do
   @moduledoc """
-  Compact ETS policy cache keyed by **registrable domain** (eTLD+1).
+  Bounded ETS read-through cache of policy matches, backed by Postgres.
 
-  Host and domain blocklist entries are collapsed to their registrable domain at
-  compile time. Matching a hostname then needs a single O(1) lookup: if
-  `ads.evil.com` is checked, we look up `evil.com`. Subdomains inherit the
-  domain owner's listing.
+  Keys are **registrable domains** (eTLD+1). Positive and negative results are
+  cached. When the table exceeds `policy_cache_max_entries`, older entries are
+  evicted so resident memory stays predictable on small instances.
 
-  Stored values are slim tuples (no duplicated domain string / slug maps) and
-  the table is `:compressed` to fit large adult lists in ~512MB instances.
+  Imports and enable/disable only invalidate the cache (and bump policy
+  generation); they do not rebuild a full in-memory copy of every blocklist.
   """
 
   use GenServer
 
-  alias NostrSpamFighter.Policy.PublicSuffix
+  import Ecto.Query
+
+  alias NostrSpamFighter.Repo
+  alias NostrSpamFighter.Policy.BlocklistEntry
 
   @meta :nsf_policy_meta
-  @retire_ms 5_000
-  @boot_rebuild_ms 5_000
+  @default_max_entries 100_000
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -28,46 +29,21 @@ defmodule NostrSpamFighter.Policy.Cache do
     :ets.new(@meta, [:named_table, :set, :public, read_concurrency: true])
     domains = new_domains_table()
     :ets.insert(@meta, {:domains, domains})
-    :ets.insert(@meta, {:generation, 0})
+    :ets.insert(@meta, {:generation, load_generation()})
     :ets.insert(@meta, {:ready, true})
-    {:ok, %{boot_rebuild_ref: nil}, {:continue, :schedule_boot_rebuild}}
+    {:ok, %{}}
   end
 
   @impl true
-  def handle_continue(:schedule_boot_rebuild, state) do
-    ref = Process.send_after(self(), :boot_rebuild, @boot_rebuild_ms)
-    {:noreply, %{state | boot_rebuild_ref: ref}}
-  end
-
-  @impl true
-  def handle_info(:boot_rebuild, state) do
-    unless Application.get_env(:nostr_spam_fighter, :ingest_enabled, true) == false do
-      _ = NostrSpamFighter.Policy.Compiler.compile()
-    end
-
-    {:noreply, %{state | boot_rebuild_ref: nil}}
-  end
-
-  def handle_info({:retire_tables, domains}, state) do
-    delete_table(domains)
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_call(:rebuild, _from, state) do
-    state = cancel_boot_rebuild(state)
-    result = NostrSpamFighter.Policy.Compiler.compile()
+  def handle_call(:invalidate, _from, state) do
+    result = do_invalidate()
     {:reply, result, state}
   end
 
-  def handle_call({:install, generation, domains}, _from, state) do
-    state = cancel_boot_rebuild(state)
-    do_install(generation, domains)
+  def handle_call(:clear, _from, state) do
+    clear_domains()
     {:reply, :ok, state}
   end
-
-  @impl true
-  def handle_cast({:compiled, _result}, state), do: {:noreply, state}
 
   @spec generation() :: non_neg_integer()
   def generation do
@@ -86,11 +62,22 @@ defmodule NostrSpamFighter.Policy.Cache do
   end
 
   @doc """
-  Returns match maps for a registrable domain key.
+  Returns match maps for a registrable domain, using ETS then Postgres.
   """
   @spec lookup_domain(String.t()) :: [map()]
-  def lookup_domain(domain) when is_binary(domain) do
-    lookup_domain(domain, 1)
+  def lookup_domain(domain) when is_binary(domain) and domain != "" do
+    gen = generation()
+
+    case ets_get(domain) do
+      {:ok, ^gen, hits} ->
+        hits_to_maps(domain, hits)
+
+      {:ok, _other_gen, _hits} ->
+        fetch_and_cache(domain, gen)
+
+      :miss ->
+        fetch_and_cache(domain, gen)
+    end
   end
 
   def lookup_domain(_), do: []
@@ -98,22 +85,19 @@ defmodule NostrSpamFighter.Policy.Cache do
   @spec size() :: non_neg_integer()
   def size, do: table_size(domains_table())
 
+  @doc """
+  Clears the ETS cache and bumps policy generation. Kept as `rebuild/0` for
+  call sites that previously recompiled the full policy into memory.
+  """
   @spec rebuild() :: {:ok, non_neg_integer()} | {:error, term()}
-  def rebuild do
-    if Process.whereis(__MODULE__) do
-      GenServer.call(__MODULE__, :rebuild, 120_000)
-    else
-      NostrSpamFighter.Policy.Compiler.compile()
-    end
-  end
+  def rebuild, do: invalidate()
 
-  @doc false
-  @spec install(non_neg_integer(), :ets.tid()) :: :ok
-  def install(generation, domains) when is_integer(generation) and generation >= 0 do
-    if self() == Process.whereis(__MODULE__) do
-      do_install(generation, domains)
+  @spec invalidate() :: {:ok, non_neg_integer()} | {:error, term()}
+  def invalidate do
+    if Process.whereis(__MODULE__) do
+      GenServer.call(__MODULE__, :invalidate, 30_000)
     else
-      GenServer.call(__MODULE__, {:install, generation, domains})
+      do_invalidate()
     end
   end
 
@@ -129,93 +113,160 @@ defmodule NostrSpamFighter.Policy.Cache do
     ])
   end
 
-  @doc false
-  def insert_rule(domains, rule) do
-    case rule.rule_type do
-      type when type in ["host", "domain"] ->
-        case PublicSuffix.registrable_domain(rule.normalized_value) do
-          domain when is_binary(domain) and domain != "" ->
-            hit =
-              {rule.category_id, rule.blocklist_id, rule.blocklist_version_id, rule.entry_id}
-
-            case :ets.lookup(domains, domain) do
-              [{^domain, hits}] ->
-                if Enum.any?(hits, fn {category_id, _, _, _} ->
-                     category_id == rule.category_id
-                   end) do
-                  true
-                else
-                  :ets.insert(domains, {domain, [hit | hits]})
-                end
-
-              [] ->
-                :ets.insert(domains, {domain, [hit]})
-            end
-
-          _ ->
-            false
-        end
-
-      # URL-prefix rules are intentionally ignored to keep the hot cache small.
-      _ ->
-        false
-    end
+  defp fetch_and_cache(domain, gen) do
+    hits = query_domain_hits(domain)
+    ets_put(domain, gen, hits)
+    maybe_evict()
+    hits_to_maps(domain, hits)
   end
 
-  defp lookup_domain(domain, retries) do
+  defp query_domain_hits(domain) do
+    rows =
+      from(e in BlocklistEntry,
+        join: v in assoc(e, :blocklist_version),
+        join: b in assoc(v, :blocklist),
+        join: c in assoc(b, :category),
+        where: c.enabled == true,
+        where: b.enabled == true,
+        where: b.active_version_id == v.id,
+        where: e.rule_type in ^["host", "domain"],
+        where: e.registrable_domain == ^domain,
+        select: {
+          c.id,
+          b.id,
+          v.id,
+          e.id
+        }
+      )
+      |> Repo.all()
+
+    rows
+    |> Enum.reduce(%{}, fn {category_id, _, _, _} = hit, acc ->
+      Map.put_new(acc, category_id, hit)
+    end)
+    |> Map.values()
+  end
+
+  defp hits_to_maps(domain, hits) do
+    Enum.map(hits, fn {category_id, blocklist_id, version_id, entry_id} ->
+      %{
+        entry_id: entry_id,
+        rule_type: "domain",
+        normalized_value: domain,
+        blocklist_id: blocklist_id,
+        blocklist_version_id: version_id,
+        category_id: category_id
+      }
+    end)
+  end
+
+  defp ets_get(domain) do
     case domains_table() do
       nil ->
-        []
+        :miss
 
       tid ->
         try do
           case :ets.lookup(tid, domain) do
-            [{^domain, hits}] ->
-              Enum.map(hits, fn {category_id, blocklist_id, version_id, entry_id} ->
-                %{
-                  entry_id: entry_id,
-                  rule_type: "domain",
-                  normalized_value: domain,
-                  blocklist_id: blocklist_id,
-                  blocklist_version_id: version_id,
-                  category_id: category_id
-                }
-              end)
-
-            _ ->
-              []
+            [{^domain, gen, hits}] -> {:ok, gen, hits}
+            _ -> :miss
           end
         rescue
-          ArgumentError ->
-            if retries > 0, do: lookup_domain(domain, retries - 1), else: []
+          ArgumentError -> :miss
         end
     end
   end
 
-  defp cancel_boot_rebuild(%{boot_rebuild_ref: ref} = state) when is_reference(ref) do
-    Process.cancel_timer(ref)
-    %{state | boot_rebuild_ref: nil}
+  defp ets_put(domain, gen, hits) do
+    case domains_table() do
+      nil ->
+        :ok
+
+      tid ->
+        try do
+          :ets.insert(tid, {domain, gen, hits})
+        rescue
+          ArgumentError -> :ok
+        end
+    end
   end
 
-  defp cancel_boot_rebuild(state), do: state
+  defp maybe_evict do
+    tid = domains_table()
+    max = max_entries()
+    size = table_size(tid)
 
-  defp do_install(generation, domains) do
-    old = domains_table()
-    :ets.insert(@meta, {:domains, domains})
+    if tid && size > max do
+      excess = size - div(max, 2)
+
+      _ =
+        :ets.foldl(
+          fn {domain, _gen, _hits}, deleted ->
+            if deleted < excess do
+              :ets.delete(tid, domain)
+              deleted + 1
+            else
+              deleted
+            end
+          end,
+          0,
+          tid
+        )
+    end
+  end
+
+  defp do_invalidate do
+    clear_domains()
+    generation = bump_generation()
     :ets.insert(@meta, {:generation, generation})
     :ets.insert(@meta, {:ready, true})
-    schedule_retire(old)
-    :ok
+    {:ok, generation}
+  rescue
+    error -> {:error, error}
   end
 
-  defp schedule_retire(domains) do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        Process.send_after(pid, {:retire_tables, domains}, @retire_ms)
-
-      _ ->
-        delete_table(domains)
+  defp clear_domains do
+    case domains_table() do
+      nil -> :ok
+      tid -> :ets.delete_all_objects(tid)
     end
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp bump_generation do
+    current =
+      case Repo.one(from g in "policy_generations", select: max(g.generation)) do
+        nil -> 0
+        max -> max
+      end
+
+    next = current + 1
+
+    Repo.insert_all("policy_generations", [
+      %{
+        id: Ecto.UUID.dump!(Ecto.UUID.generate()),
+        generation: next,
+        reason: "invalidate",
+        inserted_at: DateTime.utc_now() |> DateTime.truncate(:second),
+        updated_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      }
+    ])
+
+    next
+  end
+
+  defp load_generation do
+    case Repo.one(from g in "policy_generations", select: max(g.generation)) do
+      nil -> 0
+      max -> max
+    end
+  rescue
+    _ -> 0
+  end
+
+  defp max_entries do
+    Application.get_env(:nostr_spam_fighter, :policy_cache_max_entries, @default_max_entries)
   end
 
   defp domains_table do
@@ -231,13 +282,5 @@ defmodule NostrSpamFighter.Policy.Cache do
     :ets.info(tid, :size) || 0
   rescue
     ArgumentError -> 0
-  end
-
-  defp delete_table(nil), do: :ok
-
-  defp delete_table(tid) do
-    if :ets.info(tid) != :undefined, do: :ets.delete(tid)
-  rescue
-    ArgumentError -> :ok
   end
 end

@@ -80,7 +80,7 @@ defmodule NostrSpamFighter.MixProject do
       {:bech32, "~> 1.0"},
       {:bypass, "~> 2.1", only: :test},
       {:nostr_access, "~> 0.5.0"},
-      {:nostr_elixir, github: "twenty-eighty/nostr_elixir"}
+      {:nostr_elixir, "~> 0.3.0"}
     ]
   end
 

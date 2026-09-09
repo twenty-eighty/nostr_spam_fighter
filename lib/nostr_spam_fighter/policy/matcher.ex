@@ -1,10 +1,10 @@
 defmodule NostrSpamFighter.Policy.Matcher do
   @moduledoc """
-  Matches hostnames against the compiled policy by **registrable domain**.
+  Matches hostnames by **registrable domain** via the DB-backed policy cache.
 
   A listed domain blocks that domain and all of its subdomains (the domain
-  owner is treated as responsible for subdomain content). Exact host and
-  URL-prefix rules are not kept in the hot cache.
+  owner is treated as responsible for subdomain content). URL-prefix rules are
+  not consulted on the hot path.
   """
 
   alias NostrSpamFighter.Policy.{Cache, Normalizer, PublicSuffix}

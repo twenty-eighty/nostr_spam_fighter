@@ -1,5 +1,6 @@
 defmodule NostrSpamFighter.Scanner.RedirectResolverTest do
-  use ExUnit.Case, async: false
+  use NostrSpamFighter.DataCase, async: false
+
   alias NostrSpamFighter.Scanner.RedirectResolver
 
   setup do

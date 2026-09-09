@@ -36,17 +36,12 @@ defmodule NostrSpamFighter.Policy.ImporterTest do
   test "imports domains and matches subdomains only", %{list: list, category: category} do
     assert {:ok, version} = Importer.import_manual(list, "Evil.COM.\n# comment\n")
     assert version.status == "active"
-    result = Cache.rebuild()
-    assert match?({:ok, _}, result), inspect(result)
     assert Cache.generation() > 0
 
     matches =
       NostrSpamFighter.Policy.Matcher.match_target("https://ads.evil.com/x", "ads.evil.com")
 
     assert Enum.any?(matches, &(&1.category_id == category.id))
-
-    refute NostrSpamFighter.Policy.Matcher.match_target("https://notevil.com", "notevil.com") !=
-             []
 
     no = NostrSpamFighter.Policy.Matcher.match_target("https://notevil.com", "notevil.com")
     assert no == []

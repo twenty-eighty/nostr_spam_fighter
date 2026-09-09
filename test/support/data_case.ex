@@ -37,6 +37,7 @@ defmodule NostrSpamFighter.DataCase do
   """
   def setup_sandbox(tags) do
     pid = Ecto.Adapters.SQL.Sandbox.start_owner!(NostrSpamFighter.Repo, shared: not tags[:async])
+    clear_policy_cache()
     on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
   end
 
@@ -54,5 +55,13 @@ defmodule NostrSpamFighter.DataCase do
         opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
       end)
     end)
+  end
+
+  defp clear_policy_cache do
+    if Process.whereis(NostrSpamFighter.Policy.Cache) do
+      GenServer.call(NostrSpamFighter.Policy.Cache, :clear)
+    end
+  rescue
+    _ -> :ok
   end
 end
