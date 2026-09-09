@@ -2,6 +2,7 @@ defmodule NostrSpamFighter.Application do
   @moduledoc false
 
   use Application
+  require Logger
 
   @impl true
   def start(_type, _args) do
@@ -62,9 +63,14 @@ defmodule NostrSpamFighter.Application do
 
   defp schedule_registrable_domain_backfill do
     if Application.get_env(:nostr_spam_fighter, :registrable_domain_backfill, true) do
-      # Let the endpoint bind before touching millions of rows.
-      Process.sleep(5_000)
-      _ = NostrSpamFighter.Policy.RegistrableDomainBackfill.run()
+      # Wait for port bind / health checks before competing for the DB pool.
+      Process.sleep(30_000)
+
+      if NostrSpamFighter.Policy.RegistrableDomainBackfill.pending?() do
+        _ = NostrSpamFighter.Policy.RegistrableDomainBackfill.run()
+      else
+        Logger.info("registrable_domain backfill: nothing to do")
+      end
     end
 
     :ok

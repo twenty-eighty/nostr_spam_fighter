@@ -7,40 +7,47 @@ defmodule NostrSpamFighter.Policy.RegistrableDomainBackfill do
   alias NostrSpamFighter.Repo
   alias NostrSpamFighter.Policy.{BlocklistEntry, PublicSuffix}
 
-  @batch 2_000
+  # Keep batches small so POOL_SIZE=5 instances are not starved by backfill.
+  @batch 500
+  @pause_ms 250
+  @query_opts [timeout: :infinity]
 
   @doc """
   Fills `registrable_domain` for host/domain rows that still have NULL.
 
-  Safe to call repeatedly. Runs in small batches so it can finish after boot
-  without blocking migrate or starving the web process.
+  Safe to call repeatedly. Does **not** `COUNT(*)` the table (that scans millions
+  of rows and times out on small Postgres plans). Progress is driven only by
+  `LIMIT` batches.
   """
   def run(opts \\ []) do
     batch = Keyword.get(opts, :batch, @batch)
-    total = pending_count()
+    pause_ms = Keyword.get(opts, :pause_ms, @pause_ms)
 
-    if total == 0 do
-      Logger.info("registrable_domain backfill: nothing to do")
-      {:ok, 0}
-    else
-      Logger.info("registrable_domain backfill: starting rows=#{total}")
-      updated = do_run(batch, 0)
-      Logger.info("registrable_domain backfill: finished updated=#{updated}")
-      {:ok, updated}
-    end
+    Logger.info("registrable_domain backfill: starting")
+    updated = do_run(batch, pause_ms, 0)
+    Logger.info("registrable_domain backfill: finished updated=#{updated}")
+    {:ok, updated}
+  rescue
+    error ->
+      Logger.error("registrable_domain backfill failed: #{Exception.message(error)}")
+      {:error, error}
   end
 
-  def pending_count do
-    Repo.one(
+  @doc """
+  Cheap existence check — never counts the full table.
+  """
+  def pending? do
+    Repo.exists?(
       from(e in BlocklistEntry,
         where: e.rule_type in ^["host", "domain"],
         where: is_nil(e.registrable_domain),
-        select: count(e.id)
-      )
-    ) || 0
+        limit: 1
+      ),
+      @query_opts
+    )
   end
 
-  defp do_run(batch, updated) do
+  defp do_run(batch, pause_ms, updated) do
     rows =
       from(e in BlocklistEntry,
         where: e.rule_type in ^["host", "domain"],
@@ -48,7 +55,7 @@ defmodule NostrSpamFighter.Policy.RegistrableDomainBackfill do
         select: %{id: e.id, normalized_value: e.normalized_value},
         limit: ^batch
       )
-      |> Repo.all()
+      |> Repo.all(@query_opts)
 
     case rows do
       [] ->
@@ -66,18 +73,17 @@ defmodule NostrSpamFighter.Policy.RegistrableDomainBackfill do
           ids = Enum.map(group, & &1.id)
 
           from(e in BlocklistEntry, where: e.id in ^ids)
-          |> Repo.update_all(set: [registrable_domain: domain, updated_at: now])
+          |> Repo.update_all([set: [registrable_domain: domain, updated_at: now]], @query_opts)
         end)
 
         count = updated + length(rows)
 
-        if rem(count, batch * 10) < batch do
+        if rem(count, batch * 20) < batch do
           Logger.info("registrable_domain backfill: progress updated=#{count}")
         end
 
-        # Yield so the web endpoint stays responsive on small instances.
-        Process.sleep(50)
-        do_run(batch, count)
+        Process.sleep(pause_ms)
+        do_run(batch, pause_ms, count)
     end
   end
 end
