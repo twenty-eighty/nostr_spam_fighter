@@ -11,6 +11,7 @@ defmodule NostrSpamFighter.Policy.Cache do
 
   @meta :nsf_policy_meta
   @retire_ms 5_000
+  @boot_rebuild_ms 5_000
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -23,20 +24,48 @@ defmodule NostrSpamFighter.Policy.Cache do
     :ets.insert(@meta, {:host_domain, host_domain})
     :ets.insert(@meta, {:url_prefix, url})
     :ets.insert(@meta, {:generation, 0})
-    :ets.insert(@meta, {:ready, false})
-    {:ok, %{}, {:continue, :rebuild}}
+    # Empty tables are ready immediately; heavy compile is deferred so release
+    # eval tasks (migrate / ops scripts) can run without competing for RAM.
+    :ets.insert(@meta, {:ready, true})
+    {:ok, %{boot_rebuild_ref: nil}, {:continue, :schedule_boot_rebuild}}
   end
 
   @impl true
-  def handle_continue(:rebuild, state) do
+  def handle_continue(:schedule_boot_rebuild, state) do
+    ref = Process.send_after(self(), :boot_rebuild, @boot_rebuild_ms)
+    {:noreply, %{state | boot_rebuild_ref: ref}}
+  end
+
+  @impl true
+  def handle_info(:boot_rebuild, state) do
     unless Application.get_env(:nostr_spam_fighter, :ingest_enabled, true) == false do
       _ = NostrSpamFighter.Policy.Compiler.compile()
-    else
-      :ets.insert(@meta, {:ready, true})
     end
 
+    {:noreply, %{state | boot_rebuild_ref: nil}}
+  end
+
+  def handle_info({:retire_tables, host_domain, url_prefix}, state) do
+    delete_table(host_domain)
+    delete_table(url_prefix)
     {:noreply, state}
   end
+
+  @impl true
+  def handle_call(:rebuild, _from, state) do
+    state = cancel_boot_rebuild(state)
+    result = NostrSpamFighter.Policy.Compiler.compile()
+    {:reply, result, state}
+  end
+
+  def handle_call({:install, generation, host_domain, url_prefix}, _from, state) do
+    state = cancel_boot_rebuild(state)
+    do_install(generation, host_domain, url_prefix)
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_cast({:compiled, _result}, state), do: {:noreply, state}
 
   @spec generation() :: non_neg_integer()
   def generation do
@@ -71,38 +100,17 @@ defmodule NostrSpamFighter.Policy.Cache do
 
   @spec size() :: non_neg_integer()
   def size do
-    hd = table_size(host_domain_table())
-    url = table_size(url_prefix_table())
-    hd + url
+    table_size(host_domain_table()) + table_size(url_prefix_table())
   end
 
   @spec rebuild() :: {:ok, non_neg_integer()} | {:error, term()}
   def rebuild do
-    result = NostrSpamFighter.Policy.Compiler.compile()
-    GenServer.cast(__MODULE__, {:compiled, result})
-    result
-  end
-
-  @impl true
-  def handle_call(:rebuild, _from, state) do
-    result = NostrSpamFighter.Policy.Compiler.compile()
-    {:reply, result, state}
-  end
-
-  @impl true
-  def handle_call({:install, generation, host_domain, url_prefix}, _from, state) do
-    do_install(generation, host_domain, url_prefix)
-    {:reply, :ok, state}
-  end
-
-  @impl true
-  def handle_cast({:compiled, _result}, state), do: {:noreply, state}
-
-  @impl true
-  def handle_info({:retire_tables, host_domain, url_prefix}, state) do
-    delete_table(host_domain)
-    delete_table(url_prefix)
-    {:noreply, state}
+    # Prefer GenServer path so a pending boot rebuild is cancelled.
+    if Process.whereis(__MODULE__) do
+      GenServer.call(__MODULE__, :rebuild, 120_000)
+    else
+      NostrSpamFighter.Policy.Compiler.compile()
+    end
   end
 
   @doc false
@@ -114,30 +122,6 @@ defmodule NostrSpamFighter.Policy.Cache do
       do_install(generation, host_domain, url_prefix)
     else
       GenServer.call(__MODULE__, {:install, generation, host_domain, url_prefix})
-    end
-  end
-
-  defp do_install(generation, host_domain, url_prefix) do
-    old_hd = host_domain_table()
-    old_url = url_prefix_table()
-
-    :ets.insert(@meta, {:host_domain, host_domain})
-    :ets.insert(@meta, {:url_prefix, url_prefix})
-    :ets.insert(@meta, {:generation, generation})
-    :ets.insert(@meta, {:ready, true})
-
-    schedule_retire(old_hd, old_url)
-    :ok
-  end
-
-  defp schedule_retire(host_domain, url_prefix) do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        Process.send_after(pid, {:retire_tables, host_domain, url_prefix}, @retire_ms)
-
-      _ ->
-        delete_table(host_domain)
-        delete_table(url_prefix)
     end
   end
 
@@ -176,6 +160,37 @@ defmodule NostrSpamFighter.Policy.Cache do
 
       _ ->
         :ok
+    end
+  end
+
+  defp cancel_boot_rebuild(%{boot_rebuild_ref: ref} = state) when is_reference(ref) do
+    Process.cancel_timer(ref)
+    %{state | boot_rebuild_ref: nil}
+  end
+
+  defp cancel_boot_rebuild(state), do: state
+
+  defp do_install(generation, host_domain, url_prefix) do
+    old_hd = host_domain_table()
+    old_url = url_prefix_table()
+
+    :ets.insert(@meta, {:host_domain, host_domain})
+    :ets.insert(@meta, {:url_prefix, url_prefix})
+    :ets.insert(@meta, {:generation, generation})
+    :ets.insert(@meta, {:ready, true})
+
+    schedule_retire(old_hd, old_url)
+    :ok
+  end
+
+  defp schedule_retire(host_domain, url_prefix) do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        Process.send_after(pid, {:retire_tables, host_domain, url_prefix}, @retire_ms)
+
+      _ ->
+        delete_table(host_domain)
+        delete_table(url_prefix)
     end
   end
 
