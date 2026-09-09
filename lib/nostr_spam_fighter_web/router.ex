@@ -50,6 +50,7 @@ defmodule NostrSpamFighterWeb.Router do
       live "/categories/:id", CategoryLive.Show
       live "/blocklists", BlocklistLive.Index
       live "/blocklists/:id", BlocklistLive.Show
+      live "/lookup", LookupLive
       live "/matches", MatchLive.Index
       live "/relays", RelayLive.Index
       live "/admins", AdminLive.Index

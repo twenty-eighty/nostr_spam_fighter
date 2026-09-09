@@ -42,7 +42,8 @@ defmodule NostrSpamFighterWeb.TargetModerationController do
   end
 
   defp public(result) do
-    Map.take(result, [
+    result
+    |> Map.take([
       :domain,
       :registrable_domain,
       :url,
@@ -53,10 +54,20 @@ defmodule NostrSpamFighterWeb.TargetModerationController do
       :blacklisted,
       :status,
       :categories,
+      :lists,
       :scanned_at,
       :policy_generation
     ])
+    |> Map.update(:lists, [], &public_lists/1)
   end
+
+  defp public_lists(lists) when is_list(lists) do
+    Enum.map(lists, fn list ->
+      Map.take(list, [:id, :name, :category_slug, :category_name, :blocks_serving])
+    end)
+  end
+
+  defp public_lists(_), do: []
 
   defp etag(result) do
     material =
@@ -66,7 +77,8 @@ defmodule NostrSpamFighterWeb.TargetModerationController do
           result[:final_url],
           result[:policy_generation],
           result[:resolution_status],
-          Enum.join(result[:categories] || [], ",")
+          Enum.join(result[:categories] || [], ","),
+          result[:lists] |> List.wrap() |> Enum.map(& &1[:id]) |> Enum.join(",")
         ],
         ":"
       )

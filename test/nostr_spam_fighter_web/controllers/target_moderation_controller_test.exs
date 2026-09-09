@@ -29,7 +29,7 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     bypass = Bypass.open()
     base = "http://127.0.0.1:#{bypass.port}"
 
-    {:ok, conn: conn, category: cat, bypass: bypass, base: base}
+    {:ok, conn: conn, category: cat, list: list, bypass: bypass, base: base}
   end
 
   test "domain moderation matches listed registrable domains", %{conn: conn} do
@@ -41,6 +41,10 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert body["status"] == "matched"
     assert body["blacklisted"] == true
     assert body["categories"] == ["adult"]
+
+    assert [%{"name" => "adult-domains", "category_slug" => "adult", "blocks_serving" => true}] =
+             body["lists"]
+
     assert body["redirect_count"] == 0
     assert body["resolution_status"] == nil
     assert is_integer(body["policy_generation"])
@@ -53,6 +57,7 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert body["status"] == "clean"
     assert body["blacklisted"] == false
     assert body["categories"] == []
+    assert body["lists"] == []
     assert body["registrable_domain"] == "good.example"
   end
 
@@ -63,13 +68,20 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
 
   test "url moderation follows redirects onto a blocked host", %{
     conn: conn,
+    list: list,
     bypass: bypass,
     base: base
   } do
+    assert {:ok, _} = Importer.import_manual(list, "evil.com\nlocalhost\n")
+
     Bypass.expect(bypass, "GET", "/safe", fn conn ->
       conn
-      |> Plug.Conn.put_resp_header("location", "https://cdn.evil.com/x")
+      |> Plug.Conn.put_resp_header("location", "http://localhost:#{bypass.port}/blocked")
       |> Plug.Conn.resp(302, "")
+    end)
+
+    Bypass.expect(bypass, "GET", "/blocked", fn conn ->
+      Plug.Conn.resp(conn, 200, "ok")
     end)
 
     body =
@@ -80,8 +92,10 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert body["status"] == "matched"
     assert body["blacklisted"] == true
     assert body["categories"] == ["adult"]
+    assert Enum.any?(body["lists"], &(&1["name"] == "adult-domains"))
     assert body["redirect_count"] == 1
-    assert body["final_url"] =~ "evil.com"
+    assert body["final_url"] =~ "localhost"
+    assert body["final_domain"] == "localhost"
     assert body["resolution_status"]
   end
 

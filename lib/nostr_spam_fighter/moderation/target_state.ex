@@ -8,7 +8,16 @@ defmodule NostrSpamFighter.Moderation.TargetState do
   import Ecto.Query
 
   alias NostrSpamFighter.Repo
-  alias NostrSpamFighter.Policy.{Cache, Category, Matcher, Normalizer, PublicSuffix}
+
+  alias NostrSpamFighter.Policy.{
+    Cache,
+    Category,
+    Lookup,
+    Matcher,
+    Normalizer,
+    PublicSuffix
+  }
+
   alias NostrSpamFighter.Scanner.RedirectResolver
 
   @spec lookup_domain(String.t()) :: {:ok, map()} | {:error, :invalid_domain}
@@ -41,26 +50,40 @@ defmodule NostrSpamFighter.Moderation.TargetState do
   def lookup_url(_), do: {:error, :invalid_url}
 
   defp present_domain(host, registrable, matches) do
-    base_result(host, registrable, nil, matches)
+    lists = Lookup.lists_for_registrable(registrable)
+
+    base_result(host, registrable, nil, matches, lists)
     |> Map.merge(%{
+      kind: :domain,
       final_url: nil,
       final_domain: nil,
       redirect_count: 0,
-      resolution_status: nil
+      resolution_status: nil,
+      hosts: [%{host: host, registrable_domain: registrable, lists: lists}]
     })
   end
 
   defp present_url(host, registrable, url, resolution) do
-    base_result(host, registrable, url, resolution.matches)
+    host_results = explain_hosts([host | Enum.map(resolution.hops, & &1.hostname)])
+
+    lists =
+      host_results
+      |> Enum.flat_map(& &1.lists)
+      |> Enum.uniq_by(& &1.id)
+      |> Enum.sort_by(&{&1.category_slug, &1.name})
+
+    base_result(host, registrable, url, resolution.matches, lists)
     |> Map.merge(%{
+      kind: :url,
       final_url: resolution.final_url,
       final_domain: resolution.final_hostname,
       redirect_count: resolution.redirect_count,
-      resolution_status: resolution.status
+      resolution_status: resolution.status,
+      hosts: host_results
     })
   end
 
-  defp base_result(host, registrable, url, matches) do
+  defp base_result(host, registrable, url, matches, lists) do
     categories = load_categories(matches)
     blocking? = Enum.any?(categories, & &1.blocks_serving)
     slugs = Enum.map(categories, & &1.slug)
@@ -73,9 +96,22 @@ defmodule NostrSpamFighter.Moderation.TargetState do
       blacklisted: matched? and blocking?,
       status: if(matched?, do: "matched", else: "clean"),
       categories: slugs,
+      lists: lists,
       scanned_at: DateTime.utc_now() |> DateTime.truncate(:second),
       policy_generation: Cache.generation()
     }
+  end
+
+  defp explain_hosts(hosts) do
+    hosts
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+    |> Enum.map(fn host ->
+      case Lookup.lists_for_host(host) do
+        {:ok, explained} -> explained
+        {:error, _} -> %{host: host, registrable_domain: nil, lists: []}
+      end
+    end)
   end
 
   defp load_categories([]), do: []

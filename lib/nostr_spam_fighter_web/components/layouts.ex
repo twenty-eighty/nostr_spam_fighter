@@ -47,6 +47,7 @@ defmodule NostrSpamFighterWeb.Layouts do
             <a href={~p"/events"}>Events</a>
             <a href={~p"/categories"}>Categories</a>
             <a href={~p"/blocklists"}>Blocklists</a>
+            <a href={~p"/lookup"}>Lookup</a>
             <a href={~p"/matches"}>Matches</a>
             <a href={~p"/relays"}>Relays</a>
             <a href={~p"/admins"}>Admins</a>
