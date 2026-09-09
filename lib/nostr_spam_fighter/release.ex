@@ -41,8 +41,8 @@ defmodule NostrSpamFighter.Release do
   end
 
   @doc """
-  Disables every blocklist and rebuilds the policy cache (empty when all disabled).
-  Intended for one-off release ops, e.g. on Render:
+  Disables every blocklist. Restart the web service afterward so the running
+  policy cache rebuilds without those rules.
 
       bin/nostr_spam_fighter eval 'NostrSpamFighter.Release.disable_all_blocklists()'
   """
@@ -52,7 +52,6 @@ defmodule NostrSpamFighter.Release do
     {:ok, count, _} =
       Ecto.Migrator.with_repo(NostrSpamFighter.Repo, fn _repo ->
         import Ecto.Query
-        alias NostrSpamFighter.Policy
         alias NostrSpamFighter.Policy.Blocklist
 
         now = DateTime.utc_now() |> DateTime.truncate(:second)
@@ -61,25 +60,11 @@ defmodule NostrSpamFighter.Release do
           from(b in Blocklist, where: b.enabled == true)
           |> NostrSpamFighter.Repo.update_all(set: [enabled: false, updated_at: now])
 
-        wait_for_cache!()
-        {:ok, _gen} = Policy.Cache.rebuild()
-        IO.inspect({:disabled_blocklists, count, :cache_size, Policy.Cache.size()})
+        IO.inspect({:disabled_blocklists, count})
         count
       end)
 
     count
-  end
-
-  defp wait_for_cache!(attempts \\ 50)
-  defp wait_for_cache!(0), do: raise("Policy.Cache did not start")
-
-  defp wait_for_cache!(attempts) do
-    if Process.whereis(NostrSpamFighter.Policy.Cache) do
-      :ok
-    else
-      Process.sleep(100)
-      wait_for_cache!(attempts - 1)
-    end
   end
 
   defp repos do
