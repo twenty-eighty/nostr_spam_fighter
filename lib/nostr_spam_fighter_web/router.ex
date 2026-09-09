@@ -63,6 +63,8 @@ defmodule NostrSpamFighterWeb.Router do
 
     get "/articles/:naddr/moderation", ArticleModerationController, :show
     post "/articles/moderation/check", ArticleModerationController, :check
+    get "/domains/:domain/moderation", TargetModerationController, :domain
+    get "/urls/moderation", TargetModerationController, :url
   end
 
   if Application.compile_env(:nostr_spam_fighter, :dev_routes) do
