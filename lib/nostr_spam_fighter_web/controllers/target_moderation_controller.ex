@@ -46,6 +46,10 @@ defmodule NostrSpamFighterWeb.TargetModerationController do
       :domain,
       :registrable_domain,
       :url,
+      :final_url,
+      :final_domain,
+      :redirect_count,
+      :resolution_status,
       :blacklisted,
       :status,
       :categories,
@@ -56,7 +60,16 @@ defmodule NostrSpamFighterWeb.TargetModerationController do
 
   defp etag(result) do
     material =
-      "#{result[:registrable_domain]}:#{result[:policy_generation]}:#{Enum.join(result[:categories] || [], ",")}"
+      Enum.join(
+        [
+          result[:registrable_domain],
+          result[:final_url],
+          result[:policy_generation],
+          result[:resolution_status],
+          Enum.join(result[:categories] || [], ",")
+        ],
+        ":"
+      )
 
     ~s("#{Base.encode16(:crypto.hash(:sha256, material), case: :lower)}")
   end

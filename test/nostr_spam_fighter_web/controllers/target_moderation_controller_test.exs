@@ -26,7 +26,10 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
 
     assert {:ok, _} = Importer.import_manual(list, "evil.com\n")
 
-    {:ok, conn: conn, category: cat}
+    bypass = Bypass.open()
+    base = "http://127.0.0.1:#{bypass.port}"
+
+    {:ok, conn: conn, category: cat, bypass: bypass, base: base}
   end
 
   test "domain moderation matches listed registrable domains", %{conn: conn} do
@@ -38,6 +41,8 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert body["status"] == "matched"
     assert body["blacklisted"] == true
     assert body["categories"] == ["adult"]
+    assert body["redirect_count"] == 0
+    assert body["resolution_status"] == nil
     assert is_integer(body["policy_generation"])
     assert body["scanned_at"]
   end
@@ -56,16 +61,42 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert json_response(conn, 400)["error"] == "invalid domain"
   end
 
-  test "url moderation uses the host", %{conn: conn} do
-    url = "https://ads.evil.com/path?x=1"
-    body = json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => url}), 200)
+  test "url moderation follows redirects onto a blocked host", %{
+    conn: conn,
+    bypass: bypass,
+    base: base
+  } do
+    Bypass.expect(bypass, "GET", "/safe", fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("location", "https://cdn.evil.com/x")
+      |> Plug.Conn.resp(302, "")
+    end)
 
-    assert body["url"] == "https://ads.evil.com/path?x=1"
-    assert body["domain"] == "ads.evil.com"
-    assert body["registrable_domain"] == "evil.com"
+    body =
+      json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => base <> "/safe"}), 200)
+
+    assert body["url"] == base <> "/safe"
+    assert body["domain"] == "127.0.0.1"
     assert body["status"] == "matched"
     assert body["blacklisted"] == true
     assert body["categories"] == ["adult"]
+    assert body["redirect_count"] == 1
+    assert body["final_url"] =~ "evil.com"
+    assert body["resolution_status"]
+  end
+
+  test "clean url with successful fetch stays clean", %{conn: conn, bypass: bypass, base: base} do
+    Bypass.expect(bypass, "GET", "/ok", fn conn ->
+      Plug.Conn.resp(conn, 200, "ok")
+    end)
+
+    body = json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => base <> "/ok"}), 200)
+
+    assert body["status"] == "clean"
+    assert body["blacklisted"] == false
+    assert body["categories"] == []
+    assert body["redirect_count"] == 0
+    assert body["resolution_status"] == "completed"
   end
 
   test "url required and invalid url", %{conn: conn} do
