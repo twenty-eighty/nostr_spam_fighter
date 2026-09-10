@@ -84,8 +84,21 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
       Plug.Conn.resp(conn, 200, "ok")
     end)
 
-    body =
-      json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => base <> "/safe"}), 200)
+    prev_level = Logger.level()
+    Logger.configure(level: :info)
+
+    on_exit(fn -> Logger.configure(level: prev_level) end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(
+          self(),
+          {:body,
+           json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => base <> "/safe"}), 200)}
+        )
+      end)
+
+    assert_received {:body, body}
 
     assert body["url"] == base <> "/safe"
     assert body["domain"] == "127.0.0.1"
@@ -97,6 +110,9 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert body["final_url"] =~ "localhost"
     assert body["final_domain"] == "localhost"
     assert body["resolution_status"]
+    assert log =~ "url moderation start host=127.0.0.1"
+    assert log =~ "url moderation blocked host=127.0.0.1 final=localhost redirects=1"
+    assert log =~ "cats=adult lists=adult-domains"
   end
 
   test "clean url with successful fetch stays clean", %{conn: conn, bypass: bypass, base: base} do
