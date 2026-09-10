@@ -38,5 +38,6 @@ defmodule NostrSpamFighter.Nostr.Event do
       :last_seen_at
     ])
     |> validate_required([:event_id, :kind, :pubkey, :created_at, :raw_event])
+    |> unique_constraint(:event_id, name: :nostr_events_pkey)
   end
 end

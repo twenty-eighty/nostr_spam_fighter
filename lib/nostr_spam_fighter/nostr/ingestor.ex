@@ -28,18 +28,11 @@ defmodule NostrSpamFighter.Nostr.Ingestor do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     Repo.transaction(fn ->
-      existing = Repo.get(Event, event["id"])
+      case Repo.get(Event, event["id"]) do
+        %Event{} = existing ->
+          touch_existing(existing, relay_url, now)
 
-      cond do
-        existing ->
-          existing
-          |> Event.changeset(%{last_seen_at: now})
-          |> Repo.update!()
-
-          record_relay(event["id"], relay_url)
-          existing
-
-        true ->
+        nil ->
           case insert_event(event, now) do
             {:ok, inserted} ->
               record_relay(event["id"], relay_url)
@@ -54,7 +47,13 @@ defmodule NostrSpamFighter.Nostr.Ingestor do
               inserted
 
             {:error, changeset} ->
-              Repo.rollback(changeset)
+              if unique_event_id?(changeset) do
+                Event
+                |> Repo.get!(event["id"])
+                |> touch_existing(relay_url, now)
+              else
+                Repo.rollback(changeset)
+              end
           end
       end
     end)
@@ -83,6 +82,23 @@ defmodule NostrSpamFighter.Nostr.Ingestor do
       last_seen_at: now
     })
     |> Repo.insert()
+  end
+
+  defp touch_existing(existing, relay_url, now) do
+    existing =
+      existing
+      |> Event.changeset(%{last_seen_at: now})
+      |> Repo.update!()
+
+    record_relay(existing.event_id, relay_url)
+    existing
+  end
+
+  defp unique_event_id?(changeset) do
+    Enum.any?(changeset.errors, fn
+      {:event_id, {_, opts}} -> opts[:constraint] == :unique
+      _ -> false
+    end)
   end
 
   defp record_relay(event_id, relay_url) when is_binary(relay_url) do
