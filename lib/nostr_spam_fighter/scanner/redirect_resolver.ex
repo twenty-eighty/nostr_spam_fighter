@@ -42,7 +42,10 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
   defp do_hop(url, opts, deadline, left, seen, hops) do
     allow_loopback? = Keyword.get(opts, :allow_loopback?, false)
     matches = Matcher.match_target(url, Normalizer.hostname_from_url(url))
+    fetch_hop(url, opts, deadline, left, seen, hops, matches, allow_loopback?)
+  end
 
+  defp fetch_hop(url, opts, deadline, left, seen, hops, matches, allow_loopback?) do
     case AddressValidator.validate_url(url, allow_loopback?: allow_loopback?) do
       {:error, reason} ->
         hop = hop_record(length(hops), url, nil, nil, nil, matches)

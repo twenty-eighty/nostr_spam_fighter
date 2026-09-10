@@ -58,6 +58,26 @@ defmodule NostrSpamFighter.Scanner.RedirectResolverTest do
     assert result.status == "malformed_redirect"
   end
 
+  test "follows HEAD redirects onto a media URL without issuing GET", %{
+    bypass: bypass,
+    base: base
+  } do
+    Bypass.expect(bypass, "HEAD", "/from", fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("location", "/s2048x3072/photo.png")
+      |> Plug.Conn.resp(302, "")
+    end)
+
+    Bypass.expect(bypass, "HEAD", "/s2048x3072/photo.png", fn conn ->
+      Plug.Conn.resp(conn, 200, String.duplicate("x", 50_000))
+    end)
+
+    result = RedirectResolver.resolve(base <> "/from", allow_loopback?: true)
+    assert result.status == "completed"
+    assert result.redirect_count == 1
+    assert result.final_url =~ "/s2048x3072/photo.png"
+  end
+
   test "blocked original host without allow_loopback", %{base: base} do
     result = RedirectResolver.resolve(base <> "/x", allow_loopback?: false)
     assert result.status == "blocked_address"

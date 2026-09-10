@@ -27,19 +27,16 @@ defmodule NostrSpamFighter.Scanner.HTTPClientTest do
              HTTPClient.request(dest, url: url, allow_loopback?: true)
   end
 
-  test "falls back to GET when HEAD is not allowed", %{bypass: bypass, dest: dest, url: url} do
+  test "does not fall back to GET when HEAD is not allowed", %{
+    bypass: bypass,
+    dest: dest,
+    url: url
+  } do
     Bypass.expect(bypass, "HEAD", "/page", fn conn ->
       Plug.Conn.resp(conn, 405, "")
     end)
 
-    Bypass.expect(bypass, "GET", "/page", fn conn ->
-      conn
-      |> Plug.Conn.put_resp_header("location", "/next")
-      |> Plug.Conn.resp(302, "")
-    end)
-
-    assert {:ok, %{status: 302, location: "/next"}} =
-             HTTPClient.request(dest, url: url)
+    assert {:ok, %{status: 405, location: nil}} = HTTPClient.request(dest, url: url)
   end
 
   test "drops oversized Location headers", %{bypass: bypass, dest: dest, url: url} do

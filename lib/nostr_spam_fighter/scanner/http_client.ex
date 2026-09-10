@@ -2,15 +2,16 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
   @moduledoc """
   Controlled streaming request that connects only to a validated IP.
 
-  Redirect following only needs status and `Location`, so this prefers HEAD
-  and closes as soon as headers arrive. A GET of a large body on a 512 MB
-  host can OOM before the process ever looks at the bytes.
+  Redirect following only needs status and `Location`. This never issues GET:
+  a CDN that ignores HEAD/Range can send a multi-megabyte image in one Mint
+  `stream/2` call and OOM a 512 MB host. HEAD 405/501 is treated as a final
+  response; the hostname was already matched before this request.
   """
 
   alias NostrSpamFighter.Memory
 
   @redirect_statuses [301, 302, 303, 307, 308]
-  @head_unsupported [405, 501]
+  @recv_buffer_bytes 8_192
 
   @spec request(map(), keyword()) ::
           {:ok, %{status: integer(), location: String.t() | nil, duration_ms: non_neg_integer()}}
@@ -21,14 +22,7 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
       {:error, :memory_pressure}
     else
       started = System.monotonic_time(:millisecond)
-
-      case fetch(destination, opts, "HEAD") do
-        {:ok, %{status: status}} when status in @head_unsupported ->
-          wrap_duration(fetch(destination, opts, "GET"), started)
-
-        other ->
-          wrap_duration(other, started)
-      end
+      wrap_duration(fetch(destination, opts), started)
     end
   catch
     :exit, _ -> {:error, :connection_failure}
@@ -42,7 +36,7 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
 
   defp wrap_duration(other, _started), do: other
 
-  defp fetch(destination, opts, method) do
+  defp fetch(destination, opts) do
     timeout = Keyword.get(opts, :request_timeout_ms, cfg(:request_timeout_ms, 10_000))
     connect_timeout = Keyword.get(opts, :connect_timeout_ms, cfg(:connect_timeout_ms, 5_000))
     ip = hd(destination.ips)
@@ -53,18 +47,19 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
     connect_opts = [
       timeout: connect_timeout,
       hostname: destination.host,
-      protocols: [:http1]
+      protocols: [:http1],
+      transport_opts: [
+        timeout: connect_timeout,
+        recbuf: @recv_buffer_bytes,
+        buffer: @recv_buffer_bytes
+      ]
     ]
 
     case Mint.HTTP.connect(scheme, ip_string, destination.port, connect_opts) do
       {:ok, conn} ->
-        case Mint.HTTP.request(
-               conn,
-               method,
-               request_path(url),
-               headers(destination.host, method),
-               nil
-             ) do
+        _ = shrink_socket(conn)
+
+        case Mint.HTTP.request(conn, "HEAD", request_path(url), headers(destination.host), nil) do
           {:ok, conn, _ref} ->
             receive_headers(conn, timeout)
 
@@ -93,20 +88,24 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
     end
   end
 
-  defp headers(host, method) do
-    base = [
+  defp shrink_socket(conn) do
+    opts = [recbuf: @recv_buffer_bytes, buffer: @recv_buffer_bytes]
+
+    case Mint.HTTP.get_socket(conn) do
+      {:sslsocket, _, _} = socket -> :ssl.setopts(socket, opts)
+      socket when is_port(socket) -> :inet.setopts(socket, opts)
+      _ -> :ok
+    end
+  end
+
+  defp headers(host) do
+    [
       {"host", host},
       {"user-agent", "NostrSpamFighter/1.0"},
       {"accept", "*/*"},
       {"accept-encoding", "identity"},
       {"connection", "close"}
     ]
-
-    if method == "GET" do
-      [{"range", "bytes=0-0"} | base]
-    else
-      base
-    end
   end
 
   defp request_path(url) do
