@@ -9,11 +9,7 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
   alias NostrSpamFighter.Relays
   alias NostrSpamFighter.Nostr.{EventFetcher, EventValidator, Ingestor}
   alias NostrSpamFighter.Scanner.Pipeline
-
-  alias NostrSpamFighter.Moderation.{
-    ArticleAddress,
-    ArticleModerationState
-  }
+  alias NostrSpamFighter.Moderation.ArticleAddress
 
   def ensure(%{kind: kind, pubkey: pubkey, identifier: d_tag} = data) do
     started = System.monotonic_time(:millisecond)
@@ -30,8 +26,8 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
 
     {scan_ms, scan_result} =
       case article do
-        %{current_event_id: event_id} = art when is_binary(event_id) ->
-          timed(fn -> scan_serialized(art, event_id) end)
+        %{current_event_id: event_id} when is_binary(event_id) ->
+          timed(fn -> Pipeline.run(event_id, only_if_needed: true) end)
 
         _ ->
           {0, :skipped}
@@ -51,33 +47,6 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
   defp needs_event?(nil), do: true
   defp needs_event?(%{current_event_id: nil}), do: true
   defp needs_event?(_), do: false
-
-  defp needs_scan?(article) do
-    case Repo.get_by(ArticleModerationState, article_address_id: article.id) do
-      %{status: status} when status in ["clean", "matched", "partial", "failed"] -> false
-      _ -> true
-    end
-  end
-
-  # One scan at a time per event so concurrent API hits do not race on
-  # article_moderation_states inserts. Waiters re-check and usually skip.
-  defp scan_serialized(article, event_id) do
-    lock = {:nsf_article_scan, event_id}
-
-    :global.trans(lock, fn -> maybe_scan(article, event_id) end, [Node.self()], :infinity)
-  end
-
-  defp maybe_scan(article, event_id) do
-    article = get_article_by_id(article.id) || article
-
-    if needs_scan?(article) do
-      Pipeline.run(event_id)
-    else
-      :skipped
-    end
-  end
-
-  defp get_article_by_id(id), do: Repo.get(ArticleAddress, id)
 
   defp fetch_and_ingest(%{kind: kind, pubkey: pubkey, identifier: d_tag, relays: hints}) do
     relays = fetch_relays(hints)
@@ -125,6 +94,7 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
   defp format_phase(ms, :no_relays), do: "no_relays:#{ms}ms"
   defp format_phase(ms, {:ok, :hit, n}), do: "hit:#{ms}ms events=#{n}"
   defp format_phase(ms, {:ok, :miss, n}), do: "miss:#{ms}ms events=#{n}"
+  defp format_phase(ms, {:ok, :skipped}), do: "skipped:#{ms}ms"
   defp format_phase(ms, {:ok, %{status: status}}), do: "#{status}:#{ms}ms"
   defp format_phase(ms, {:error, reason}), do: "error:#{ms}ms reason=#{inspect(reason)}"
   defp format_phase(ms, _), do: "#{ms}ms"

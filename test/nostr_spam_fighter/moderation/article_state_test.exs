@@ -73,5 +73,14 @@ defmodule NostrSpamFighter.Moderation.ArticleStateTest do
 
     state = Repo.one!(ArticleModerationState)
     assert state.status in ["clean", "matched", "partial"]
+
+    # Only one completed scan should win; waiters skip via only_if_needed.
+    completed =
+      Repo.aggregate(
+        from(s in NostrSpamFighter.Moderation.Scan, where: s.status != "running"),
+        :count
+      )
+
+    assert completed == 1
   end
 end

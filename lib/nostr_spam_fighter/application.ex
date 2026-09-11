@@ -8,6 +8,7 @@ defmodule NostrSpamFighter.Application do
   def start(_type, _args) do
     NostrSpamFighter.Accounts.require_admin_protection!()
     attach_blocklist_refresh_telemetry()
+    NostrSpamFighter.Scanner.HostLimiter.setup()
 
     children =
       [
@@ -25,6 +26,7 @@ defmodule NostrSpamFighter.Application do
         ),
         NostrSpamFighter.Accounts.RateLimiter,
         NostrSpamFighter.Policy.Cache,
+        NostrSpamFighter.Scanner.KeyedLock,
         NostrSpamFighter.Accounts.ReplayCache,
         {Task.Supervisor, name: NostrSpamFighter.IngestTasks},
         NostrSpamFighter.Nostr.IngestQueue,

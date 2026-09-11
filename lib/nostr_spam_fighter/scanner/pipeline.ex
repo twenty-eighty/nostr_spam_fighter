@@ -9,9 +9,11 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
   alias NostrSpamFighter.Repo
   alias NostrSpamFighter.Nostr.Event
   alias NostrSpamFighter.Policy.Cache
-  alias NostrSpamFighter.Scanner.{Kind30023Processor, RedirectResolver}
+  alias NostrSpamFighter.Scanner.{HostLimiter, Kind30023Processor, RedirectResolver}
 
   alias NostrSpamFighter.Moderation.{
+    ArticleAddress,
+    ArticleModerationState,
     Classification,
     Match,
     RedirectHop,
@@ -29,7 +31,52 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
 
   @slow_url_ms 1_000
 
+  @doc """
+  Runs a scan for `event_id`.
+
+  Options:
+
+    * `:only_if_needed` - when true, skip if article already has a terminal
+      moderation state (`clean` / `matched` / `partial` / `failed`)
+  """
   def run(event_id, opts \\ []) do
+    NostrSpamFighter.Scanner.KeyedLock.with_lock({:scan, event_id}, fn ->
+      if Keyword.get(opts, :only_if_needed, false) and not needs_scan?(event_id) do
+        {:ok, :skipped}
+      else
+        do_run(event_id, opts)
+      end
+    end)
+  end
+
+  defp needs_scan?(event_id) do
+    article =
+      Repo.get_by(ArticleAddress, current_event_id: event_id) ||
+        case Repo.get(Event, event_id) do
+          %Event{article_address: address} when is_binary(address) ->
+            Repo.get_by(ArticleAddress, address: address)
+
+          _ ->
+            nil
+        end
+
+    case article do
+      nil ->
+        true
+
+      article ->
+        case Repo.get_by(ArticleModerationState, article_address_id: article.id) do
+          %{status: status, event_id: ^event_id}
+          when status in ["clean", "matched", "partial", "failed"] ->
+            false
+
+          _ ->
+            true
+        end
+    end
+  end
+
+  defp do_run(event_id, opts) do
     started = System.monotonic_time(:millisecond)
     event = Repo.get!(Event, event_id)
     processor = Map.fetch!(@processors, event.kind)
@@ -82,11 +129,12 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
       )
 
       total_ms = System.monotonic_time(:millisecond) - started
+      concurrency = Application.get_env(:nostr_spam_fighter, :http_concurrency, 4)
 
       Logger.info(
         "scan complete event_id=#{short_id(event.event_id)} status=#{status} " <>
           "urls=#{length(occurrences)} matches=#{length(matches)} " <>
-          "resolve_ms=#{resolve_ms} total_ms=#{total_ms}"
+          "resolve_ms=#{resolve_ms} total_ms=#{total_ms} concurrency=#{concurrency}"
       )
 
       {:ok, scan}
@@ -122,12 +170,32 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
   end
 
   defp resolve_and_match(occurrences, opts) do
-    grouped = Enum.group_by(occurrences, & &1.normalized_url)
+    grouped =
+      occurrences
+      |> Enum.group_by(& &1.normalized_url)
+      |> Map.to_list()
 
-    Enum.reduce(grouped, {[], []}, fn {_url, occs}, {res_acc, match_acc} ->
+    concurrency = max(Application.get_env(:nostr_spam_fighter, :http_concurrency, 4), 1)
+
+    grouped
+    |> Task.async_stream(
+      fn {url, occs} ->
+        host = URI.parse(url).host || "_"
+
+        result =
+          HostLimiter.with_host(host, fn ->
+            RedirectResolver.resolve(url, opts)
+          end)
+
+        maybe_log_slow_url(url, result)
+        {occs, result}
+      end,
+      max_concurrency: concurrency,
+      timeout: :infinity,
+      ordered: false
+    )
+    |> Enum.reduce({[], []}, fn {:ok, {occs, result}}, {res_acc, match_acc} ->
       primary = hd(occs)
-      result = RedirectResolver.resolve(primary.normalized_url, opts)
-      maybe_log_slow_url(primary.normalized_url, result)
       {resolution, hops} = persist_resolution(primary, result)
 
       matches =
@@ -178,7 +246,7 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
           %RedirectHop{}
           |> RedirectHop.changeset(
             Map.put(hop, :url_resolution_id, resolution.id)
-            |> Map.drop([:matches])
+            |> Map.drop([:matches, :dns_ms, :connect_ms, :head_ms])
           )
           |> Repo.insert()
 
