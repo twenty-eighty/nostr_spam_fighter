@@ -2,7 +2,8 @@ defmodule NostrSpamFighter.Moderation.TargetState do
   @moduledoc """
   Live policy lookup for a domain or URL, shaped like article moderation results.
 
-  URL lookups follow redirects (same as article scans) and match policy on every hop.
+  URL lookups follow redirects (same as article scans) and match policy on every hop,
+  except for configured media hosts in `:skip_redirect_hosts`.
   """
 
   import Ecto.Query

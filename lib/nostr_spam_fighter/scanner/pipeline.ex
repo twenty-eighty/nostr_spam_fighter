@@ -300,7 +300,7 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
 
   defp scan_status(resolutions, matches) do
     statuses = Enum.map(resolutions, & &1.status)
-    network_fail = Enum.any?(statuses, &(&1 != "completed"))
+    network_fail = Enum.any?(statuses, &(&1 not in ["completed", "skipped_host"]))
 
     cond do
       matches != [] and network_fail -> "partial"

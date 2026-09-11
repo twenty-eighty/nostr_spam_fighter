@@ -9,6 +9,7 @@ defmodule NostrSpamFighter.Application do
     NostrSpamFighter.Accounts.require_admin_protection!()
     attach_blocklist_refresh_telemetry()
     NostrSpamFighter.Scanner.HostLimiter.setup()
+    NostrSpamFighter.Scanner.SkipHosts.setup()
 
     children =
       [
@@ -34,7 +35,11 @@ defmodule NostrSpamFighter.Application do
       ] ++ ingest_children()
 
     opts = [strategy: :one_for_one, name: NostrSpamFighter.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    with {:ok, pid} <- Supervisor.start_link(children, opts) do
+      _ = NostrSpamFighter.Scanner.SkipHosts.ensure_defaults()
+      {:ok, pid}
+    end
   end
 
   @impl true

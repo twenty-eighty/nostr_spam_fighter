@@ -129,6 +129,19 @@ defmodule NostrSpamFighterWeb.TargetModerationControllerTest do
     assert body["resolution_status"] == "completed"
   end
 
+  test "known media hosts skip redirect fetch", %{conn: conn} do
+    url =
+      "https://blossom.primal.net/babdc64fcf9e85c0022e866c16a3738a51426556ae10a04267d9d91e2411ce5c.png"
+
+    body = json_response(get(conn, ~p"/api/v1/urls/moderation", %{"url" => url}), 200)
+
+    assert body["status"] == "clean"
+    assert body["domain"] == "blossom.primal.net"
+    assert body["final_domain"] == "blossom.primal.net"
+    assert body["redirect_count"] == 0
+    assert body["resolution_status"] == "skipped_host"
+  end
+
   test "url required and invalid url", %{conn: conn} do
     assert json_response(get(conn, ~p"/api/v1/urls/moderation"), 400)["error"] == "url required"
 

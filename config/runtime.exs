@@ -63,6 +63,15 @@ config :nostr_spam_fighter,
     String.to_integer(System.get_env("BLOCKLIST_RECEIVE_TIMEOUT_MS") || "120000"),
   blocklist_max_bytes: String.to_integer(System.get_env("BLOCKLIST_MAX_BYTES") || "8000000")
 
+if skip_hosts = System.get_env("SKIP_REDIRECT_HOSTS") do
+  config :nostr_spam_fighter,
+    skip_redirect_hosts:
+      skip_hosts
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.downcase(String.trim(&1)))
+      |> Enum.reject(&(&1 == ""))
+end
+
 if memory_limit = System.get_env("MEMORY_LIMIT_BYTES") do
   config :nostr_spam_fighter, memory_limit_bytes: String.to_integer(memory_limit)
 end

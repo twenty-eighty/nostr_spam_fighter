@@ -83,6 +83,27 @@ defmodule NostrSpamFighter.Scanner.RedirectResolverTest do
     assert result.status == "blocked_address"
   end
 
+  test "skips HEAD for configured media hosts" do
+    url =
+      "https://blossom.primal.net/babdc64fcf9e85c0022e866c16a3738a51426556ae10a04267d9d91e2411ce5c.png"
+
+    result = RedirectResolver.resolve(url)
+
+    assert result.status == "skipped_host"
+    assert result.error == nil
+    assert result.redirect_count == 0
+    assert result.http_status == nil
+    assert result.final_hostname == "blossom.primal.net"
+    assert result.final_url == url
+  end
+
+  test "skips HEAD for m.primal.net image URLs" do
+    result = RedirectResolver.resolve("https://m.primal.net/PYun.jpg")
+
+    assert result.status == "skipped_host"
+    assert result.final_hostname == "m.primal.net"
+  end
+
   test "skips HTTP under memory pressure", %{base: base} do
     prev_pressure = Application.get_env(:nostr_spam_fighter, :memory_pressure, :unset)
     prev_fun = Application.get_env(:nostr_spam_fighter, :memory_usage_fun, :unset)

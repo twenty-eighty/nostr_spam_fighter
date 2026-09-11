@@ -4,7 +4,7 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
   """
 
   alias NostrSpamFighter.Policy.{Matcher, Normalizer}
-  alias NostrSpamFighter.Scanner.{AddressValidator, HTTPClient}
+  alias NostrSpamFighter.Scanner.{AddressValidator, HTTPClient, SkipHosts}
 
   @redirect_statuses [301, 302, 303, 307, 308]
 
@@ -41,8 +41,15 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
 
   defp do_hop(url, opts, deadline, left, seen, hops) do
     allow_loopback? = Keyword.get(opts, :allow_loopback?, false)
-    matches = Matcher.match_target(url, Normalizer.hostname_from_url(url))
-    fetch_hop(url, opts, deadline, left, seen, hops, matches, allow_loopback?)
+    host = Normalizer.hostname_from_url(url)
+    matches = Matcher.match_target(url, host)
+
+    if skip_redirect_host?(host, opts) do
+      hop = hop_record(length(hops), url, nil, nil, nil, matches)
+      finish(:skipped_host, hops ++ [hop], url)
+    else
+      fetch_hop(url, opts, deadline, left, seen, hops, matches, allow_loopback?)
+    end
   end
 
   defp fetch_hop(url, opts, deadline, left, seen, hops, matches, allow_loopback?) do
@@ -100,7 +107,7 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
       final_hostname: last && last.hostname,
       http_status: last && last.http_status,
       redirect_count: max(length(hops) - 1, 0),
-      error: if(status == :completed, do: nil, else: to_string(status)),
+      error: if(status in [:completed, :skipped_host], do: nil, else: to_string(status)),
       dns_ms: sum_hop_ms(hops, :dns_ms),
       connect_ms: sum_hop_ms(hops, :connect_ms),
       head_ms: sum_hop_ms(hops, :head_ms)
@@ -148,6 +155,15 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
         {:error, :unsupported_scheme}
     end
   end
+
+  defp skip_redirect_host?(host, opts) when is_binary(host) do
+    case Keyword.fetch(opts, :skip_redirect_hosts) do
+      {:ok, listed} -> host in listed
+      :error -> SkipHosts.member?(host)
+    end
+  end
+
+  defp skip_redirect_host?(_, _), do: false
 
   defp ip_to_string(ip), do: ip |> :inet.ntoa() |> List.to_string()
   defp cfg(key, default), do: Application.get_env(:nostr_spam_fighter, key, default)

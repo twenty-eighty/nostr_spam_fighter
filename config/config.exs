@@ -24,6 +24,14 @@ config :nostr_spam_fighter,
   max_urls_per_event: 50,
   http_concurrency: 4,
   per_host_concurrency: 2,
+  # Exact hostnames whose URLs we match without HEAD. These are content-addressed
+  # media CDNs; a URL cache would not help because every blob has a new path.
+  skip_redirect_hosts: [
+    "blossom.primal.net",
+    "m.primal.net",
+    "image.nostr.build",
+    "i.nostr.build"
+  ],
   max_content_bytes: 512_000,
   max_tags: 200,
   max_tag_length: 2_048,
