@@ -14,27 +14,27 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
   @recv_buffer_bytes 8_192
 
   @spec request(map(), keyword()) ::
-          {:ok, %{status: integer(), location: String.t() | nil, duration_ms: non_neg_integer()}}
+          {:ok,
+           %{
+             status: integer(),
+             location: String.t() | nil,
+             duration_ms: non_neg_integer(),
+             connect_ms: non_neg_integer(),
+             head_ms: non_neg_integer()
+           }}
           | {:error, atom()}
   def request(destination, opts \\ []) do
     if Memory.tight?() do
       :telemetry.execute([:nostr_spam_fighter, :memory, :shed], %{count: 1}, %{reason: :http})
       {:error, :memory_pressure}
     else
-      started = System.monotonic_time(:millisecond)
-      wrap_duration(fetch(destination, opts), started)
+      fetch(destination, opts)
     end
   catch
     :exit, _ -> {:error, :connection_failure}
   end
 
   def redirect_status?(status), do: status in @redirect_statuses
-
-  defp wrap_duration({:ok, result}, started) do
-    {:ok, Map.put(result, :duration_ms, System.monotonic_time(:millisecond) - started)}
-  end
-
-  defp wrap_duration(other, _started), do: other
 
   defp fetch(destination, opts) do
     timeout = Keyword.get(opts, :request_timeout_ms, cfg(:request_timeout_ms, 10_000))
@@ -64,13 +64,30 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
       transport_opts: transport_opts
     ]
 
+    connect_started = System.monotonic_time(:millisecond)
+
     case Mint.HTTP.connect(scheme, ip_string, destination.port, connect_opts) do
       {:ok, conn} ->
+        connect_ms = System.monotonic_time(:millisecond) - connect_started
         _ = shrink_socket(conn)
+        head_started = System.monotonic_time(:millisecond)
 
         case Mint.HTTP.request(conn, "HEAD", request_path(url), headers(destination.host), nil) do
           {:ok, conn, _ref} ->
-            receive_headers(conn, timeout)
+            case receive_headers(conn, timeout) do
+              {:ok, result} ->
+                head_ms = System.monotonic_time(:millisecond) - head_started
+
+                {:ok,
+                 Map.merge(result, %{
+                   duration_ms: connect_ms + head_ms,
+                   connect_ms: connect_ms,
+                   head_ms: head_ms
+                 })}
+
+              error ->
+                error
+            end
 
           {:error, conn, _reason} ->
             Mint.HTTP.close(conn)

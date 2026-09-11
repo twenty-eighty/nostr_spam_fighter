@@ -9,21 +9,23 @@ defmodule NostrSpamFighter.Scanner.AddressValidator do
           scheme: String.t(),
           host: String.t(),
           port: pos_integer(),
-          ips: [:inet.ip_address()]
+          ips: [:inet.ip_address()],
+          dns_ms: non_neg_integer()
         }
 
   @spec validate_url(String.t(), keyword()) :: {:ok, destination()} | {:error, atom()}
   def validate_url(url, opts \\ []) do
     with {:ok, uri} <- parse_uri(url),
          {:ok, host} <- Normalizer.normalize_host(uri.host),
-         {:ok, ips} <- resolve_host(host),
+         {:ok, ips, dns_ms} <- resolve_host_timed(host),
          :ok <- reject_non_public(ips, opts) do
       {:ok,
        %{
          scheme: uri.scheme,
          host: host,
          port: uri.port || default_port(uri.scheme),
-         ips: ips
+         ips: ips,
+         dns_ms: dns_ms
        }}
     end
   end
@@ -52,27 +54,40 @@ defmodule NostrSpamFighter.Scanner.AddressValidator do
   end
 
   def resolve_host(host) do
-    case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, ip} ->
-        {:ok, [ip]}
+    case resolve_host_timed(host) do
+      {:ok, ips, _dns_ms} -> {:ok, ips}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-      {:error, :einval} ->
-        case :inet.getaddrs(String.to_charlist(host), :inet) do
-          {:ok, v4} ->
-            v6 =
+  # Prefer A records. Looking up AAAA after every successful A often stalls
+  # 1–2s on dual-stack-broken hosts/resolvers; we only need one connectable IP.
+  defp resolve_host_timed(host) do
+    started = System.monotonic_time(:millisecond)
+
+    result =
+      case :inet.parse_address(String.to_charlist(host)) do
+        {:ok, ip} ->
+          {:ok, [ip]}
+
+        {:error, :einval} ->
+          case :inet.getaddrs(String.to_charlist(host), :inet) do
+            {:ok, v4} ->
+              {:ok, Enum.uniq(v4)}
+
+            {:error, _} ->
               case :inet.getaddrs(String.to_charlist(host), :inet6) do
-                {:ok, addrs} -> addrs
-                _ -> []
+                {:ok, addrs} -> {:ok, addrs}
+                {:error, _} -> {:error, :dns_failure}
               end
+          end
+      end
 
-            {:ok, Enum.uniq(v4 ++ v6)}
+    dns_ms = System.monotonic_time(:millisecond) - started
 
-          {:error, _} ->
-            case :inet.getaddrs(String.to_charlist(host), :inet6) do
-              {:ok, addrs} -> {:ok, addrs}
-              {:error, _} -> {:error, :dns_failure}
-            end
-        end
+    case result do
+      {:ok, ips} -> {:ok, ips, dns_ms}
+      {:error, reason} -> {:error, reason}
     end
   end
 

@@ -146,7 +146,9 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
       host = URI.parse(url).host || "?"
 
       Logger.info(
-        "url resolve slow host=#{host} duration_ms=#{duration} status=#{result.status} " <>
+        "url resolve slow host=#{host} duration_ms=#{duration} " <>
+          "dns_ms=#{result[:dns_ms] || 0} connect_ms=#{result[:connect_ms] || 0} " <>
+          "head_ms=#{result[:head_ms] || 0} status=#{result.status} " <>
           "redirects=#{result.redirect_count}"
       )
     end

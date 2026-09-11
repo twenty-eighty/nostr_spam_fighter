@@ -53,10 +53,15 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
 
       {:ok, dest} ->
         case HTTPClient.request(dest, Keyword.put(opts, :url, url)) do
-          {:ok, %{status: status, location: location, duration_ms: duration}} ->
+          {:ok, %{status: status, location: location} = result} ->
             hop =
               hop_record(length(hops), url, dest, status, location, matches)
-              |> Map.put(:duration_ms, duration)
+              |> Map.merge(%{
+                duration_ms: result.duration_ms,
+                dns_ms: Map.get(dest, :dns_ms, 0),
+                connect_ms: Map.get(result, :connect_ms, 0),
+                head_ms: Map.get(result, :head_ms, 0)
+              })
 
             hops = hops ++ [hop]
 
@@ -75,7 +80,10 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
             end
 
           {:error, reason} ->
-            hop = hop_record(length(hops), url, dest, nil, nil, matches)
+            hop =
+              hop_record(length(hops), url, dest, nil, nil, matches)
+              |> Map.put(:dns_ms, Map.get(dest, :dns_ms, 0))
+
             finish(reason, hops ++ [hop], url)
         end
     end
@@ -92,7 +100,10 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
       final_hostname: last && last.hostname,
       http_status: last && last.http_status,
       redirect_count: max(length(hops) - 1, 0),
-      error: if(status == :completed, do: nil, else: to_string(status))
+      error: if(status == :completed, do: nil, else: to_string(status)),
+      dns_ms: sum_hop_ms(hops, :dns_ms),
+      connect_ms: sum_hop_ms(hops, :connect_ms),
+      head_ms: sum_hop_ms(hops, :head_ms)
     }
   end
 
@@ -105,8 +116,15 @@ defmodule NostrSpamFighter.Scanner.RedirectResolver do
       http_status: status,
       location: location,
       duration_ms: nil,
+      dns_ms: 0,
+      connect_ms: 0,
+      head_ms: 0,
       matches: matches
     }
+  end
+
+  defp sum_hop_ms(hops, key) do
+    Enum.reduce(hops, 0, fn hop, acc -> acc + (hop[key] || 0) end)
   end
 
   defp resolve_location(_current, nil), do: {:error, :malformed_redirect}
