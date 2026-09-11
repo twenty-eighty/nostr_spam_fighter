@@ -44,15 +44,24 @@ defmodule NostrSpamFighter.Scanner.HTTPClient do
     scheme = if destination.scheme == "https", do: :https, else: :http
     url = Keyword.fetch!(opts, :url)
 
+    base_transport_opts = [
+      timeout: connect_timeout,
+      recbuf: @recv_buffer_bytes,
+      buffer: @recv_buffer_bytes
+    ]
+
+    transport_opts =
+      if scheme == :https do
+        NostrSpamFighter.HTTP.TLS.transport_opts(base_transport_opts)
+      else
+        base_transport_opts
+      end
+
     connect_opts = [
       timeout: connect_timeout,
       hostname: destination.host,
       protocols: [:http1],
-      transport_opts: [
-        timeout: connect_timeout,
-        recbuf: @recv_buffer_bytes,
-        buffer: @recv_buffer_bytes
-      ]
+      transport_opts: transport_opts
     ]
 
     case Mint.HTTP.connect(scheme, ip_string, destination.port, connect_opts) do

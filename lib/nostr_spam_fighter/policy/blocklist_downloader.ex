@@ -26,7 +26,10 @@ defmodule NostrSpamFighter.Policy.BlocklistDownloader do
       max_redirects: 8,
       retry: false,
       receive_timeout: receive_ms,
-      connect_options: [timeout: connect_ms],
+      connect_options: [
+        timeout: connect_ms,
+        transport_opts: NostrSpamFighter.HTTP.TLS.transport_opts()
+      ],
       into: stream_into(max_bytes, on_progress, started_ms)
     ]
 
