@@ -3,6 +3,8 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
   Loads and scans an article when the API asks for it and no result exists yet.
   """
 
+  require Logger
+
   alias NostrSpamFighter.Repo
   alias NostrSpamFighter.Relays
   alias NostrSpamFighter.Nostr.{EventFetcher, EventValidator, Ingestor}
@@ -14,32 +16,45 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
   }
 
   def ensure(%{kind: kind, pubkey: pubkey, identifier: d_tag} = data) do
+    started = System.monotonic_time(:millisecond)
     article = get_article(kind, pubkey, d_tag)
 
-    if needs_event?(article) do
-      fetch_and_ingest(data)
-    end
+    {fetch_ms, fetch_result} =
+      if needs_event?(article) do
+        timed(fn -> fetch_and_ingest(data) end)
+      else
+        {0, :skipped}
+      end
 
     article = get_article(kind, pubkey, d_tag)
-    scan_if_needed(article)
+
+    {scan_ms, scan_result} =
+      case article do
+        %{current_event_id: event_id} = art when is_binary(event_id) ->
+          if needs_scan?(art) do
+            timed(fn -> Pipeline.run(event_id) end)
+          else
+            {0, :skipped}
+          end
+
+        _ ->
+          {0, :skipped}
+      end
+
+    total_ms = System.monotonic_time(:millisecond) - started
+
+    Logger.info(
+      "article on_demand kind=#{kind} d=#{truncate(d_tag)} pubkey=#{String.slice(pubkey, 0, 8)} " <>
+        "fetch=#{format_phase(fetch_ms, fetch_result)} scan=#{format_phase(scan_ms, scan_result)} " <>
+        "total_ms=#{total_ms}"
+    )
+
     :ok
   end
 
   defp needs_event?(nil), do: true
   defp needs_event?(%{current_event_id: nil}), do: true
   defp needs_event?(_), do: false
-
-  defp scan_if_needed(nil), do: :ok
-
-  defp scan_if_needed(%{current_event_id: event_id} = article) when is_binary(event_id) do
-    if needs_scan?(article) do
-      Pipeline.run(event_id)
-    else
-      :ok
-    end
-  end
-
-  defp scan_if_needed(_), do: :ok
 
   defp needs_scan?(article) do
     case Repo.get_by(ArticleModerationState, article_address_id: article.id) do
@@ -52,7 +67,7 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
     relays = fetch_relays(hints)
 
     if relays == [] do
-      :ok
+      :no_relays
     else
       filter = %{
         "#d" => [d_tag],
@@ -71,17 +86,38 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
         {:ok, events} ->
           case newest_matching(events, kind, pubkey, d_tag) do
             nil ->
-              :ok
+              {:ok, :miss, length(events)}
 
             event ->
               Ingestor.ingest(event, hd(relays), enqueue_scan: false)
+              {:ok, :hit, length(events)}
           end
 
-        {:error, _reason} ->
-          :ok
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
+
+  defp timed(fun) do
+    started = System.monotonic_time(:millisecond)
+    result = fun.()
+    {System.monotonic_time(:millisecond) - started, result}
+  end
+
+  defp format_phase(_ms, :skipped), do: "skipped"
+  defp format_phase(ms, :no_relays), do: "no_relays:#{ms}ms"
+  defp format_phase(ms, {:ok, :hit, n}), do: "hit:#{ms}ms events=#{n}"
+  defp format_phase(ms, {:ok, :miss, n}), do: "miss:#{ms}ms events=#{n}"
+  defp format_phase(ms, {:ok, %{status: status}}), do: "#{status}:#{ms}ms"
+  defp format_phase(ms, {:error, reason}), do: "error:#{ms}ms reason=#{inspect(reason)}"
+  defp format_phase(ms, _), do: "#{ms}ms"
+
+  defp truncate(value) when is_binary(value) and byte_size(value) > 24 do
+    String.slice(value, 0, 24) <> "…"
+  end
+
+  defp truncate(value), do: value
 
   defp newest_matching(events, kind, pubkey, d_tag) do
     events

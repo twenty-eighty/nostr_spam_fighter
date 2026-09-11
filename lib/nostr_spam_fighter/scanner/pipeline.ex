@@ -4,6 +4,8 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
   Historical scans are immutable.
   """
 
+  require Logger
+
   alias NostrSpamFighter.Repo
   alias NostrSpamFighter.Nostr.Event
   alias NostrSpamFighter.Policy.Cache
@@ -25,7 +27,10 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
     30_023 => Kind30023Processor
   }
 
+  @slow_url_ms 1_000
+
   def run(event_id, opts \\ []) do
+    started = System.monotonic_time(:millisecond)
     event = Repo.get!(Event, event_id)
     processor = Map.fetch!(@processors, event.kind)
     now = DateTime.utc_now() |> DateTime.truncate(:second)
@@ -49,7 +54,9 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
       indicators = Enum.take(indicators, max_urls)
 
       occurrences = persist_occurrences(scan, indicators)
+      resolve_started = System.monotonic_time(:millisecond)
       {resolutions, matches} = resolve_and_match(occurrences, opts)
+      resolve_ms = System.monotonic_time(:millisecond) - resolve_started
       classifications = classify(scan, event, matches)
       status = scan_status(resolutions, matches)
 
@@ -74,9 +81,23 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
         {:scan_completed, scan.id, status}
       )
 
+      total_ms = System.monotonic_time(:millisecond) - started
+
+      Logger.info(
+        "scan complete event_id=#{short_id(event.event_id)} status=#{status} " <>
+          "urls=#{length(occurrences)} matches=#{length(matches)} " <>
+          "resolve_ms=#{resolve_ms} total_ms=#{total_ms}"
+      )
+
       {:ok, scan}
     rescue
       error ->
+        total_ms = System.monotonic_time(:millisecond) - started
+
+        Logger.warning(
+          "scan failed event_id=#{short_id(event_id)} total_ms=#{total_ms} error=#{Exception.message(error)}"
+        )
+
         scan
         |> Scan.changeset(%{
           status: "failed",
@@ -106,6 +127,7 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
     Enum.reduce(grouped, {[], []}, fn {_url, occs}, {res_acc, match_acc} ->
       primary = hd(occs)
       result = RedirectResolver.resolve(primary.normalized_url, opts)
+      maybe_log_slow_url(primary.normalized_url, result)
       {resolution, hops} = persist_resolution(primary, result)
 
       matches =
@@ -116,6 +138,22 @@ defmodule NostrSpamFighter.Scanner.Pipeline do
       {[resolution | res_acc], matches ++ match_acc}
     end)
   end
+
+  defp maybe_log_slow_url(url, result) do
+    duration = result.duration_ms || 0
+
+    if duration >= @slow_url_ms do
+      host = URI.parse(url).host || "?"
+
+      Logger.info(
+        "url resolve slow host=#{host} duration_ms=#{duration} status=#{result.status} " <>
+          "redirects=#{result.redirect_count}"
+      )
+    end
+  end
+
+  defp short_id(id) when is_binary(id), do: String.slice(id, 0, 12)
+  defp short_id(_), do: "?"
 
   defp persist_resolution(occ, result) do
     {:ok, resolution} =
