@@ -31,11 +31,7 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
     {scan_ms, scan_result} =
       case article do
         %{current_event_id: event_id} = art when is_binary(event_id) ->
-          if needs_scan?(art) do
-            timed(fn -> Pipeline.run(event_id) end)
-          else
-            {0, :skipped}
-          end
+          timed(fn -> scan_serialized(art, event_id) end)
 
         _ ->
           {0, :skipped}
@@ -62,6 +58,26 @@ defmodule NostrSpamFighter.Moderation.OnDemand do
       _ -> true
     end
   end
+
+  # One scan at a time per event so concurrent API hits do not race on
+  # article_moderation_states inserts. Waiters re-check and usually skip.
+  defp scan_serialized(article, event_id) do
+    lock = {:nsf_article_scan, event_id}
+
+    :global.trans(lock, fn -> maybe_scan(article, event_id) end, [Node.self()], :infinity)
+  end
+
+  defp maybe_scan(article, event_id) do
+    article = get_article_by_id(article.id) || article
+
+    if needs_scan?(article) do
+      Pipeline.run(event_id)
+    else
+      :skipped
+    end
+  end
+
+  defp get_article_by_id(id), do: Repo.get(ArticleAddress, id)
 
   defp fetch_and_ingest(%{kind: kind, pubkey: pubkey, identifier: d_tag, relays: hints}) do
     relays = fetch_relays(hints)

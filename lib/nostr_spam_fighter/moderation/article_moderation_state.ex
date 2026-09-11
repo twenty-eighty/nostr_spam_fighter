@@ -28,5 +28,8 @@ defmodule NostrSpamFighter.Moderation.ArticleModerationState do
       :policy_generation
     ])
     |> validate_required([:article_address_id, :status])
+    |> unique_constraint(:article_address_id,
+      name: :article_moderation_states_article_address_id_index
+    )
   end
 end

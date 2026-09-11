@@ -37,32 +37,24 @@ defmodule NostrSpamFighter.Moderation.ArticleState do
     scan = current_id && latest_scan(current_id)
     {status, blacklisted, slugs, generation} = derive(scan)
 
-    Repo.transaction(fn ->
-      state =
-        case Repo.get_by(ArticleModerationState, article_address_id: article.id) do
-          nil ->
-            %ArticleModerationState{}
-            |> ArticleModerationState.changeset(%{
-              article_address_id: article.id,
-              event_id: current_id,
-              scan_id: scan && scan.id,
-              status: status,
-              blacklisted: blacklisted,
-              policy_generation: generation
-            })
-            |> Repo.insert!()
+    attrs = %{
+      article_address_id: article.id,
+      event_id: current_id,
+      scan_id: scan && scan.id,
+      status: status,
+      blacklisted: blacklisted,
+      policy_generation: generation
+    }
 
-          existing ->
-            existing
-            |> ArticleModerationState.changeset(%{
-              event_id: current_id,
-              scan_id: scan && scan.id,
-              status: status,
-              blacklisted: blacklisted,
-              policy_generation: generation
-            })
-            |> Repo.update!()
-        end
+    Repo.transaction(fn ->
+      # Serialize concurrent refreshes for the same article (on-demand races).
+      _ =
+        ArticleAddress
+        |> where([a], a.id == ^article.id)
+        |> lock("FOR UPDATE")
+        |> Repo.one!()
+
+      state = upsert_moderation_state!(attrs)
 
       Repo.delete_all(
         from c in ArticleModerationCategory, where: c.article_moderation_state_id == ^state.id
@@ -78,6 +70,30 @@ defmodule NostrSpamFighter.Moderation.ArticleState do
 
       state
     end)
+  end
+
+  defp upsert_moderation_state!(attrs) do
+    case Repo.get_by(ArticleModerationState, article_address_id: attrs.article_address_id) do
+      nil ->
+        %ArticleModerationState{}
+        |> ArticleModerationState.changeset(attrs)
+        |> Repo.insert(
+          on_conflict:
+            {:replace,
+             [:event_id, :scan_id, :status, :blacklisted, :policy_generation, :updated_at]},
+          conflict_target: :article_address_id,
+          returning: true
+        )
+        |> then(fn
+          {:ok, state} -> state
+          {:error, changeset} -> raise Ecto.InvalidChangesetError, changeset: changeset
+        end)
+
+      existing ->
+        existing
+        |> ArticleModerationState.changeset(attrs)
+        |> Repo.update!()
+    end
   end
 
   def lookup_by_naddr(naddr) do
